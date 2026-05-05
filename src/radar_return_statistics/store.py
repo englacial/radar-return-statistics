@@ -119,6 +119,31 @@ def clear_store(session: icechunk.Session) -> None:
         del root[key]
 
 
+def update_frame_index(session: icechunk.Session) -> None:
+    """Rebuild frame_index (uint16 per trace) and frame_names root attribute from frame_id."""
+    store = session.store
+    root = zarr.open_group(store, mode="a")
+
+    if "frame_id" not in root:
+        return
+
+    frame_ids = root["frame_id"][:]
+
+    seen: dict[str, int] = {}
+    frame_names: list[str] = []
+    for fid in frame_ids:
+        if fid not in seen:
+            seen[fid] = len(frame_names)
+            frame_names.append(fid)
+
+    assert len(frame_names) <= 65535, "Too many frames for uint16"
+
+    frame_index = np.array([seen[fid] for fid in frame_ids], dtype="uint16")
+    root.create_array("frame_index", data=frame_index, chunks=(10000,), overwrite=True)
+    root.attrs["frame_names"] = frame_names
+    logger.info("Updated frame_index: %d traces, %d unique frames", len(frame_ids), len(frame_names))
+
+
 def commit_session(session: icechunk.Session, message: str) -> str:
     """Commit the session and return the snapshot ID."""
     snapshot_id = session.commit(message)

@@ -164,6 +164,8 @@ def run(config_path: str | None = None, *, config: dict | None = None, reprocess
     for fid, ds in results:
         store.write_frame_results(session, fid, ds)
 
+    store.update_frame_index(session)
+
     # Commit
     n_frames = len(results)
     n_traces = sum(len(ds.slow_time) for _, ds in results)
