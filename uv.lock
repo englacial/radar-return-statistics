@@ -2358,12 +2358,15 @@ name = "radar-return-statistics"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "cartopy" },
     { name = "cftime" },
     { name = "click" },
     { name = "geopandas" },
     { name = "icechunk" },
+    { name = "matplotlib" },
     { name = "numpy" },
     { name = "pandas" },
+    { name = "pyproj" },
     { name = "pyyaml" },
     { name = "scipy" },
     { name = "xarray" },
@@ -2379,12 +2382,15 @@ test = [
 
 [package.metadata]
 requires-dist = [
+    { name = "cartopy" },
     { name = "cftime", specifier = ">=1.6.5" },
     { name = "click" },
     { name = "geopandas" },
     { name = "icechunk", specifier = ">=1.0.2" },
+    { name = "matplotlib" },
     { name = "numpy" },
     { name = "pandas" },
+    { name = "pyproj" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8" },
     { name = "pytest-mock", marker = "extra == 'test'", specifier = ">=3" },
     { name = "pyyaml" },
