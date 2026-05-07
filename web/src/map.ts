@@ -63,6 +63,8 @@ export function initMap(containerId: string): L.Map {
 
   baseLayers["Blue Marble"].addTo(map);
 
+  L.control.scale({ imperial: false }).addTo(map);
+
   map.on("mousemove", (e: L.LeafletMouseEvent) => {
     if (renderedPoints.length === 0) return;
     const tooltip = getOrCreateTooltip();
