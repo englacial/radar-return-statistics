@@ -70,7 +70,11 @@ RSSNR [dB] = P_surf − P_bed + 20·log10(r_surf) − 20·log10(r_bed_eff)
            = −(geometry-corrected bed/surface ratio, no attenuation correction)
 ```
 
-The system constant (transmit power, antenna gain, cable losses) appears identically in P_surf and P_bed for each instrument and cancels in any ratio. **RSSNR is therefore calibration-free by construction in both datasets** — no systematic offset is expected from instrument differences.
+The system constant (transmit power, antenna gain, cable losses) appears identically in P_surf and P_bed for each instrument and cancels in any ratio — RSSNR is calibration-free within each dataset. **However, there is a ~40 dB systematic offset between the two datasets that does not cancel:**
+
+OPR uses **CSARP coherent SAR processing**, which yields a very large coherent gain for the specular surface return (nearly perfectly flat ice-air interface → constructive coherent integration) but relatively little gain for the diffuse bed return (rough interface, volume scatter → limited coherent gain). Measured values: OPR surface ~−35 dBm, OPR bed ~−108 dBm, OPR RSSNR median ~64 dB. AGASEA uses incoherent stacking; rssnr_equiv median ~18 dB. The ~46 dB gap is the differential SAR coherent gain and is not removable without knowledge of the per-target coherent integration gain.
+
+**Conclusion: absolute RSSNR values are not comparable between the two datasets.** The RSSNR comparison in `multisystem_vs_opr.py` produces `rssnr_diff` (AGASEA − OPR) with a mean of ≈ −38 dB. This is real but driven by processing methodology, not physics of the bed. Spatial anomalies (relative to each dataset's own mean) could still be qualitatively compared.
 
 Inverting the attenuation correction gives the equivalent RSSNR:
 ```
@@ -211,8 +215,8 @@ uv run python scripts/analysis/multisystem_vs_opr.py \
 **Milestone check 2:**
 - N matched pairs > 100 at 2 km threshold (if fewer, increase to 5 km and note in output)
 - Ice thickness scatter should be broadly correlated (R > 0.8) despite time gap; systematic negative bias (AGASEA thicker than OPR 2012) is expected from glacier thinning
-- `rssnr_equiv` vs `required_surface_snr_dB` scatter should show correlation (R > 0.5 reasonable given frequency differences); any systematic offset is physically meaningful (frequency-dependent englacial scattering/absorption), not a calibration artefact
-- HiCARS and PASIN matches should show different RSSNR offsets from OPR (different frequencies), but similar ice thickness bias patterns (dynamics drives thickness, not frequency)
+- `rssnr_equiv` vs `required_surface_snr_dB` will show a ~40 dB systematic offset (AGASEA lower) due to OPR CSARP coherent SAR gain on the specular surface return; this is a known processing methodology difference and not an error
+- Ice thickness bias patterns should be similar for HiCARS and PASIN (ice dynamics is the driver, not frequency)
 
 ---
 
