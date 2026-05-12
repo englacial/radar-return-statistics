@@ -1,10 +1,13 @@
 import { IcechunkStore } from "@carbonplan/icechunk-js";
-import { VARIABLES, VARIABLE_DEPS } from "./config";
+import { VARIABLES, VARIABLE_DEPS, STORES } from "./config";
 import { createColorScale, drawLegend } from "./colormap";
 import { getCommitLog, CommitEntry, formatDate } from "./history";
 import { initMap, renderPoints, fitToData, setBasemap } from "./map";
 import { openStore, loadEssentials, loadVariables, StoreData } from "./store";
 
+const datasetSelect = document.getElementById(
+  "dataset-select"
+) as HTMLSelectElement;
 const basemapSelect = document.getElementById(
   "basemap-select"
 ) as HTMLSelectElement;
@@ -25,6 +28,7 @@ const legendCanvas = document.getElementById("legend-bar") as HTMLCanvasElement;
 let currentData: StoreData | null = null;
 let currentStore: IcechunkStore | null = null;
 let currentSnapshotId: string | undefined;
+let currentStoreUrl: string = STORES[0].url;
 let commitLog: CommitEntry[] = [];
 
 function setStatus(msg: string) {
@@ -97,7 +101,7 @@ async function loadSnapshot(snapshotId?: string) {
   currentStore = null;
 
   try {
-    currentStore = await openStore(snapshotId);
+    currentStore = await openStore(currentStoreUrl, snapshotId);
     currentData = await loadEssentials(currentStore);
 
     // Load only the initially selected variable
@@ -149,18 +153,30 @@ function renderHistoryList() {
 async function init() {
   initMap("map");
 
-  const [logResult] = await Promise.allSettled([getCommitLog()]);
+  async function switchDataset(storeUrl: string) {
+    currentStoreUrl = storeUrl;
+    currentSnapshotId = undefined;
 
-  if (logResult.status === "fulfilled") {
-    commitLog = logResult.value;
-    renderHistoryList();
-  } else {
-    historyList.innerHTML =
-      '<li class="commit-meta">Failed to load history</li>';
-    console.error("History error:", logResult.reason);
+    historyList.innerHTML = '<li class="commit-meta">Loading...</li>';
+    const [logResult] = await Promise.allSettled([getCommitLog(storeUrl)]);
+    if (logResult.status === "fulfilled") {
+      commitLog = logResult.value;
+      renderHistoryList();
+    } else {
+      historyList.innerHTML =
+        '<li class="commit-meta">Failed to load history</li>';
+      console.error("History error:", logResult.reason);
+    }
+
+    await loadSnapshot();
   }
 
-  await loadSnapshot();
+  await switchDataset(STORES[0].url);
+
+  datasetSelect.addEventListener("change", () => {
+    const selected = STORES[datasetSelect.selectedIndex];
+    if (selected) switchDataset(selected.url);
+  });
 
   basemapSelect.addEventListener("change", () => {
     setBasemap(basemapSelect.value);

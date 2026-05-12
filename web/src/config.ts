@@ -1,5 +1,18 @@
-export const STORE_URL =
-  "https://opr-radar-metrics.s3.us-west-2.amazonaws.com/icechunk/ase/";
+export interface StoreConfig {
+  label: string;
+  url: string;
+}
+
+export const STORES: StoreConfig[] = [
+  {
+    label: "Amundsen Sea Embayment",
+    url: "https://opr-radar-metrics.s3.us-west-2.amazonaws.com/icechunk/ase/",
+  },
+  {
+    label: "UTIG BaslerJKB",
+    url: "https://opr-radar-metrics.s3.us-west-2.amazonaws.com/icechunk/utig/",
+  },
+];
 
 export const ICE_PERMITTIVITY = 3.17;
 export const C = 299792458; // speed of light m/s

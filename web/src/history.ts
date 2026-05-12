@@ -1,5 +1,4 @@
 import { Repository, HttpStorage, encodeObjectId12 } from "@carbonplan/icechunk-js";
-import { STORE_URL } from "./config";
 
 export interface CommitEntry {
   id: string;
@@ -8,10 +7,8 @@ export interface CommitEntry {
   date: Date;
 }
 
-const INITIAL_COMMIT_SENTINEL = "1CECHNKREP0F1RSTCMT0";
-
-export async function getCommitLog(): Promise<CommitEntry[]> {
-  const storage = new HttpStorage(STORE_URL);
+export async function getCommitLog(storeUrl: string): Promise<CommitEntry[]> {
+  const storage = new HttpStorage(storeUrl);
   const repo = await Repository.open({ storage });
   let session = await repo.checkoutBranch("main");
   const log: CommitEntry[] = [];
@@ -27,7 +24,6 @@ export async function getCommitLog(): Promise<CommitEntry[]> {
     log.push({ id, parentId, message, date });
 
     if (!parentId) break;
-    if (encodeObjectId12(parentId) === INITIAL_COMMIT_SENTINEL) break;
 
     try {
       session = await repo.checkoutSnapshot(parentId);

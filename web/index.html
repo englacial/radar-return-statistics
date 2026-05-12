@@ -53,6 +53,7 @@
         margin-bottom: 8px;
       }
 
+      #dataset-select,
       #basemap-select,
       #variable-select {
         width: 100%;
@@ -179,6 +180,13 @@
   <body>
     <div id="sidebar">
       <h1>Radar Return Statistics</h1>
+      <div class="sidebar-section">
+        <h2>Dataset</h2>
+        <select id="dataset-select">
+          <option value="ase">Amundsen Sea Embayment</option>
+          <option value="utig">UTIG BaslerJKB</option>
+        </select>
+      </div>
       <div class="sidebar-section">
         <h2>Basemap</h2>
         <select id="basemap-select">

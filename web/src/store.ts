@@ -1,6 +1,6 @@
 import { IcechunkStore } from "@carbonplan/icechunk-js";
 import * as zarr from "zarrita";
-import { STORE_URL, C, ICE_PERMITTIVITY } from "./config";
+import { C, ICE_PERMITTIVITY } from "./config";
 
 export interface StoreData {
   latitude: Float64Array;
@@ -11,9 +11,9 @@ export interface StoreData {
   numTraces: number;
 }
 
-export async function openStore(snapshotId?: string): Promise<IcechunkStore> {
+export async function openStore(storeUrl: string, snapshotId?: string): Promise<IcechunkStore> {
   const opts = snapshotId ? { snapshot: snapshotId } : { branch: "main" };
-  return IcechunkStore.open(STORE_URL, opts);
+  return IcechunkStore.open(storeUrl, opts);
 }
 
 async function loadArray(
