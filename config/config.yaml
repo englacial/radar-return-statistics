@@ -6,7 +6,14 @@ region:
   subregion: "G-H"
 
 query:
-  collections: ["2012_Antarctica_DC8"]
+  # Seasons with layer picks and Heading variable available in the ASE (G-H subregion).
+  # Excluded: 2002/2004 P3chile (no OPR layer picks), 2009-2011 DC8/TO (missing Heading
+  # variable), 2013 P3 (spatial outlier near 180° meridian, not in ASE).
+  collections:
+    - "2012_Antarctica_DC8"
+    - "2014_Antarctica_DC8"
+    - "2016_Antarctica_DC8"
+    - "2018_Antarctica_DC8"
   max_items: null
 
 processing:
@@ -28,3 +35,4 @@ store:
   s3_bucket: "opr-radar-metrics"
   s3_prefix: "icechunk/ase"
   s3_region: "us-west-2"
+  remove_out_of_scope: false  # if true, delete stored frames not matched by current query

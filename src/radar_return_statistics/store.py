@@ -111,6 +111,41 @@ def write_frame_results(
         existing[new_size - 1] = frame_id
 
 
+def remove_frames(session: icechunk.Session, frame_ids_to_remove: set[str]) -> int:
+    """Remove all traces for the given frame IDs from the store.
+
+    Rewrites all trace-indexed arrays in-place (keeping attributes) and updates
+    the processed_frames index. Returns the number of traces removed.
+    """
+    store_obj = session.store
+    root = zarr.open_group(store_obj, mode="a")
+
+    if "frame_id" not in root:
+        return 0
+
+    frame_ids_arr = root["frame_id"][:]
+    keep_mask = np.array([fid not in frame_ids_to_remove for fid in frame_ids_arr])
+    n_removed = int((~keep_mask).sum())
+
+    if n_removed > 0:
+        n_total = len(frame_ids_arr)
+        for key in list(root.keys()):
+            arr = root[key]
+            if not isinstance(arr, zarr.Array) or not arr.shape or arr.shape[0] != n_total:
+                continue
+            attrs = dict(arr.attrs)
+            filtered = arr[:][keep_mask]
+            root.create_array(key, data=filtered, chunks=arr.chunks, overwrite=True)
+            root[key].attrs.update(attrs)
+
+    if "processed_frames" in root:
+        existing = root["processed_frames"][:]
+        remaining = np.array([f for f in existing if f not in frame_ids_to_remove], dtype="U100")
+        root.create_array("processed_frames", data=remaining, chunks=(1000,), overwrite=True)
+
+    return n_removed
+
+
 def clear_store(session: icechunk.Session) -> None:
     """Clear all data and frame tracking for a full reprocess."""
     store = session.store

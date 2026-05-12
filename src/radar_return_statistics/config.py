@@ -32,5 +32,6 @@ def load_config(config_path: str | Path) -> dict:
     config["qc"].setdefault("min_traces_after_qc", 10)
     config["store"].setdefault("backend", "local")
     config["store"].setdefault("path", "outputs/icechunk_store")
+    config["store"].setdefault("remove_out_of_scope", False)
 
     return config

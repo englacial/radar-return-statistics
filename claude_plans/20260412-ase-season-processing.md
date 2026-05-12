@@ -67,3 +67,14 @@ duplicate traces. Resolved by resetting the `main` branch to the pre-duplicate s
 ### QC threshold
 Original `min_traces_after_qc: 50` was too high for 10s-decimated CReSIS frames (typically
 20-40 traces per frame). Lowered to 15 to allow processing.
+
+### 2026-05-11 follow-up run
+Config updated to list all 4 reliable DC8 seasons (2012, 2014, 2016, 2018) explicitly.
+Full run confirmed: no orphaned frames in store, no new frames to process. The 2013_P3
+frames are absent from `processed_frames` — likely lost when the branch was reset to
+resolve the 2014 duplicate commit (2013_P3 commit predated the reset point).
+
+~105 frames persistently fail QC each run (short/noisy edge-of-line frames below
+`min_traces_after_qc: 15`). They are re-downloaded and retried every run (~10 min overhead)
+since failed-QC frames are not tracked in `processed_frames`. Could be fixed by tracking
+QC-failed frame IDs in the store.

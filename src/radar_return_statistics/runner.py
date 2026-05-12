@@ -119,10 +119,23 @@ def run(config_path: str | None = None, *, config: dict | None = None, reprocess
     frames_gdf = opr.query_frames(**query_kwargs)
     logger.info("Found %d total frames", len(frames_gdf))
 
+    # Check for stored frames outside the current query scope
+    query_frame_ids = set(frames_gdf.index)
+    orphaned_frames = processed_frames - query_frame_ids
+    remove_out_of_scope = config["store"].get("remove_out_of_scope", False)
+    if orphaned_frames:
+        logger.warning(
+            "%d stored frames are outside the current query scope%s: %s",
+            len(orphaned_frames),
+            " — will be removed" if remove_out_of_scope else " (set store.remove_out_of_scope: true to remove)",
+            ", ".join(sorted(orphaned_frames)),
+        )
+
     # Filter to unprocessed
-    frame_ids = set(frames_gdf.index)
-    new_frame_ids = frame_ids - processed_frames
-    if not new_frame_ids:
+    new_frame_ids = query_frame_ids - processed_frames
+    nothing_to_process = not new_frame_ids
+    nothing_to_remove = not (orphaned_frames and remove_out_of_scope)
+    if nothing_to_process and nothing_to_remove:
         logger.info("All frames already processed, nothing to do")
         return
 
@@ -151,7 +164,7 @@ def run(config_path: str | None = None, *, config: dict | None = None, reprocess
             except Exception:
                 logger.exception("Frame %s raised an exception", fid)
 
-    if not results:
+    if not results and nothing_to_remove:
         logger.warning("No frames produced results")
         return
 
@@ -161,20 +174,30 @@ def run(config_path: str | None = None, *, config: dict | None = None, reprocess
     if reprocess:
         store.clear_store(session)
 
+    if orphaned_frames and remove_out_of_scope:
+        n_removed = store.remove_frames(session, orphaned_frames)
+        logger.info("Removed %d traces from %d out-of-scope frames", n_removed, len(orphaned_frames))
+
     for fid, ds in results:
         store.write_frame_results(session, fid, ds)
 
     store.update_frame_index(session)
 
     # Commit
-    n_frames = len(results)
-    n_traces = sum(len(ds.slow_time) for _, ds in results)
-    summary = f"Processed {n_frames} frames ({n_traces} traces)"
+    parts = []
+    if orphaned_frames and remove_out_of_scope:
+        parts.append(f"Removed {len(orphaned_frames)} out-of-scope frames")
+    if results:
+        n_frames = len(results)
+        n_traces = sum(len(ds.slow_time) for _, ds in results)
+        parts.append(f"Processed {n_frames} frames ({n_traces} traces)")
+    summary = "; ".join(parts)
+
     if commit_message:
         message = f"{commit_message}\n\n{summary}"
     else:
         collections = config["query"].get("collections")
-        if collections:
+        if collections and results:
             message = f"{', '.join(collections)}: {summary}"
         else:
             message = summary
