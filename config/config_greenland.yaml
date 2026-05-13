@@ -1,0 +1,36 @@
+opr:
+  cache_dir: "./radar_cache/"
+
+region:
+  area: "greenland"
+  # No subregion filter — full Greenland geometry.
+
+query:
+  # Recent P3 Greenland seasons — adding incrementally.
+  collections:
+    - "2016_Greenland_P3"
+    - "2017_Greenland_P3"
+    - "2018_Greenland_P3"
+    - "2019_Greenland_P3"
+  max_items: null
+
+processing:
+  data_product: "CSARP_standard"
+  decimate_interval: "10s"
+  layer_margin_m: 50
+  ice_permittivity: 3.17
+  max_workers: 8
+
+qc:
+  max_heading_change_deg_per_km: 2.0
+  min_ice_thickness_m: 100
+  min_agl_m: 50
+  min_bed_snr_db: null
+  min_traces_after_qc: 15
+
+store:
+  backend: "s3"
+  s3_bucket: "opr-radar-metrics"
+  s3_prefix: "icechunk/greenland"
+  s3_region: "us-west-2"
+  remove_out_of_scope: false  # set true once we're confident the season list is final

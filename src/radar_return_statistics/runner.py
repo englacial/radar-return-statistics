@@ -1,6 +1,8 @@
 import logging
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
+import aiohttp
+import fsspec
 import xarray as xr
 from xopr import OPRConnection
 from xopr import geometry as xopr_geometry
@@ -10,6 +12,15 @@ from .config import load_config
 from .processing import process_frame
 
 logger = logging.getLogger(__name__)
+
+
+# fsspec's HTTPFileSystem inherits aiohttp's default ~5min total timeout, but
+# the default sock_read timeout (5 min) can fire on slow CReSIS downloads when
+# many workers compete for bandwidth on 200 MB+ frames. Set generous totals.
+def _configure_fsspec_timeout(total: int = 900) -> None:
+    timeout = aiohttp.ClientTimeout(total=total, sock_read=total)
+    for proto in ("http", "https"):
+        fsspec.config.conf.setdefault(proto, {}).setdefault("client_kwargs", {})["timeout"] = timeout
 
 
 def _get_region_geometry(region_config: dict):
@@ -85,6 +96,7 @@ def _antarctic_subregion_with_shelves(subregion):
 
 def _process_frame_worker(stac_item_row, config):
     """Worker function for parallel processing. Creates its own OPR connection."""
+    _configure_fsspec_timeout()
     opr = OPRConnection(cache_dir=config["opr"].get("cache_dir"))
     return process_frame(opr, stac_item_row, config)
 
@@ -93,6 +105,8 @@ def run(config_path: str | None = None, *, config: dict | None = None, reprocess
     """Main pipeline: query frames, process new ones, store results in icechunk."""
     if config is None:
         config = load_config(config_path)
+
+    _configure_fsspec_timeout()
 
     # Open or create icechunk repo
     repo = store.open_or_create_repo(config["store"])

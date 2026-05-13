@@ -24,14 +24,16 @@ export const STORES: StoreConfig[] = [
   },
 ];
 
-export const ICE_PERMITTIVITY = 3.17;
-export const C = 299792458; // speed of light m/s
-
-// Raw zarr array names each display variable depends on.
-// Omitted keys default to [variableName] (1:1 mapping).
-export const VARIABLE_DEPS: Record<string, string[]> = {
-  rssnr: ["surface_twtt", "bed_twtt", "surface_power_dB", "bed_power_dB"],
+// Display variable name -> zarr array name in the store. Omitted keys default
+// to a 1:1 mapping. Add an entry here when the display name differs from the
+// stored array (e.g. RSSNR is stored as `required_surface_snr_dB`).
+export const VARIABLE_SOURCE: Record<string, string> = {
+  rssnr: "required_surface_snr_dB",
 };
+
+// Raw zarr arrays each display variable depends on. Defaults to the source
+// array (or the variable name itself).
+export const VARIABLE_DEPS: Record<string, string[]> = {};
 
 export const VARIABLES: Record<
   string,

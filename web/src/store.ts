@@ -1,6 +1,6 @@
 import { IcechunkStore } from "@carbonplan/icechunk-js";
 import * as zarr from "zarrita";
-import { C, ICE_PERMITTIVITY } from "./config";
+import { VARIABLE_SOURCE } from "./config";
 
 export interface StoreData {
   latitude: Float64Array;
@@ -101,8 +101,9 @@ export async function loadVariables(
 
   const results = await Promise.all(
     missing.map(async (name) => {
+      const source = VARIABLE_SOURCE[name] ?? name;
       try {
-        const chunk = await loadArray(store, name);
+        const chunk = await loadArray(store, source);
         return [name, toFloat64Array(chunk)] as const;
       } catch {
         return null;
@@ -113,36 +114,4 @@ export async function loadVariables(
   for (const entry of results) {
     if (entry) data.variables[entry[0]] = entry[1];
   }
-
-  computeRSSNR(data.variables);
-}
-
-function computeRSSNR(variables: Record<string, Float64Array>): void {
-  const surfTwtt = variables["surface_twtt"];
-  const bedTwtt = variables["bed_twtt"];
-  const surfPower = variables["surface_power_dB"];
-  const bedPower = variables["bed_power_dB"];
-  if (!surfTwtt || !bedTwtt || !surfPower || !bedPower) return;
-
-  const n = Math.sqrt(ICE_PERMITTIVITY);
-  const speedInIce = C / n;
-  const rssnr = new Float64Array(surfTwtt.length);
-
-  for (let i = 0; i < surfTwtt.length; i++) {
-    const h = (surfTwtt[i] * C) / 2;
-    const z = ((bedTwtt[i] - surfTwtt[i]) * speedInIce) / 2;
-
-    if (isNaN(h) || isNaN(z) || h <= 0) {
-      rssnr[i] = NaN;
-      continue;
-    }
-
-    const geomSurf = 10 * Math.log10(1 / (h * h));
-    const hPlusZOverN = h + z / n;
-    const geomBed = 10 * Math.log10(1 / (hPlusZOverN * hPlusZOverN));
-
-    rssnr[i] = surfPower[i] - geomSurf - (bedPower[i] - geomBed);
-  }
-
-  variables["rssnr"] = rssnr;
 }
