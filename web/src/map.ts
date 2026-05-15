@@ -149,6 +149,106 @@ let currentVarInfo: VariableInfo | null = null;
 let tooltipEl: HTMLDivElement | null = null;
 const HOVER_THRESHOLD_PX = 12;
 
+// Polygon region-select state.
+let drawing = false;
+let drawVerts: L.LatLng[] = [];
+let drawLine: L.Polyline | null = null;
+let regionPolygon: L.Polygon | null = null;
+let polygonChangeCb: (() => void) | null = null;
+let keyHandler: ((e: KeyboardEvent) => void) | null = null;
+
+export function setOnPolygonChange(cb: (() => void) | null): void {
+  polygonChangeCb = cb;
+}
+
+export function hasPolygon(): boolean {
+  return regionPolygon !== null;
+}
+
+function setDrawCursor(on: boolean) {
+  if (map) map.getContainer().style.cursor = on ? "crosshair" : "";
+}
+
+export function startPolygonDraw(): void {
+  removeRegion();
+  drawing = true;
+  drawVerts = [];
+  map.doubleClickZoom.disable();
+  setDrawCursor(true);
+}
+
+function cancelDraw() {
+  drawing = false;
+  drawVerts = [];
+  if (drawLine) {
+    map.removeLayer(drawLine);
+    drawLine = null;
+  }
+  map.doubleClickZoom.enable();
+  setDrawCursor(false);
+}
+
+function finishDraw() {
+  if (drawVerts.length < 3) {
+    cancelDraw();
+    return;
+  }
+  const verts = drawVerts.slice();
+  cancelDraw();
+  regionPolygon = L.polygon(verts, {
+    color: "#ffd166",
+    weight: 2,
+    fillOpacity: 0.08,
+  }).addTo(map);
+  if (polygonChangeCb) polygonChangeCb();
+}
+
+// Remove the committed polygon without firing the change callback.
+function removeRegion() {
+  if (regionPolygon) {
+    map.removeLayer(regionPolygon);
+    regionPolygon = null;
+  }
+}
+
+export function clearPolygon(): void {
+  cancelDraw();
+  removeRegion();
+  if (polygonChangeCb) polygonChangeCb();
+}
+
+// Trace indices whose lat/lon fall inside the committed polygon. Tested in
+// the map's projected CRS (zoom-independent, correct at the poles).
+export function tracesInPolygon(data: StoreData): number[] {
+  if (!regionPolygon || !map.options.crs) return [];
+  const crs = map.options.crs;
+  const ring = regionPolygon.getLatLngs()[0] as L.LatLng[];
+  const poly = ring.map((ll) => crs.project(ll));
+  const n = poly.length;
+  const out: number[] = [];
+  for (let i = 0; i < data.numTraces; i++) {
+    const la = data.latitude[i];
+    const lo = data.longitude[i];
+    if (isNaN(la) || isNaN(lo)) continue;
+    const p = crs.project(L.latLng(la, lo));
+    let inside = false;
+    for (let a = 0, b = n - 1; a < n; b = a++) {
+      const xa = poly[a].x;
+      const ya = poly[a].y;
+      const xb = poly[b].x;
+      const yb = poly[b].y;
+      if (
+        ya > p.y !== yb > p.y &&
+        p.x < ((xb - xa) * (p.y - ya)) / (yb - ya) + xa
+      ) {
+        inside = !inside;
+      }
+    }
+    if (inside) out.push(i);
+  }
+  return out;
+}
+
 export function formatScaledValue(value: number, info: VariableInfo): string {
   const scaled = (info.displayScale ?? 1) * value;
   return scaled.toPrecision(4);
@@ -204,7 +304,39 @@ export function initMap(containerId: string, hemisphere: Hemisphere): L.Map {
     if (onViewChange) onViewChange();
   });
 
+  map.on("click", (e: L.LeafletMouseEvent) => {
+    if (!drawing) return;
+    drawVerts.push(e.latlng);
+    if (!drawLine) {
+      drawLine = L.polyline(drawVerts, {
+        color: "#ffd166",
+        weight: 2,
+        dashArray: "4 4",
+      }).addTo(map);
+    } else {
+      drawLine.setLatLngs(drawVerts);
+    }
+  });
+
+  map.on("dblclick", () => {
+    if (!drawing) return;
+    finishDraw();
+  });
+
+  keyHandler = (e: KeyboardEvent) => {
+    if (!drawing) return;
+    if (e.key === "Escape") cancelDraw();
+    else if (e.key === "Enter") finishDraw();
+  };
+  document.addEventListener("keydown", keyHandler);
+
   map.on("mousemove", (e: L.LeafletMouseEvent) => {
+    if (drawing) {
+      if (drawLine && drawVerts.length > 0) {
+        drawLine.setLatLngs([...drawVerts, e.latlng]);
+      }
+      return;
+    }
     if (renderedPoints.length === 0) return;
     const tooltip = getOrCreateTooltip();
     const containerPt = e.containerPoint;
@@ -268,6 +400,15 @@ export function destroyMap(): void {
   if (canvasOverlay) {
     map.removeLayer(canvasOverlay);
     canvasOverlay = null;
+  }
+  // Polygon state is per-map; reset silently (caller refreshes region UI).
+  drawing = false;
+  drawVerts = [];
+  drawLine = null;
+  regionPolygon = null;
+  if (keyHandler) {
+    document.removeEventListener("keydown", keyHandler);
+    keyHandler = null;
   }
   renderedPoints = [];
   currentFrameIds = null;

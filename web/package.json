@@ -16,6 +16,7 @@
     "leaflet": "^1.9.4",
     "proj4": "^2.15.0",
     "proj4leaflet": "^1.0.2",
+    "uplot": "^1.6.32",
     "zarrita": "^0.5.0"
   },
   "devDependencies": {

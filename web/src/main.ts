@@ -16,7 +16,18 @@ import {
   VELOCITY_BASEMAP,
   VELOCITY_LEGEND,
   velocityColorForFraction,
+  startPolygonDraw,
+  clearPolygon,
+  hasPolygon,
+  tracesInPolygon,
+  setOnPolygonChange,
 } from "./map";
+import {
+  renderHistogram,
+  clearHistogram,
+  seasonColors,
+  HistSeries,
+} from "./histogram";
 import { openStore, loadEssentials, loadVariables, StoreData } from "./store";
 
 const datasetSelect = document.getElementById(
@@ -49,6 +60,15 @@ const velocityLegendMax = document.getElementById("velocity-legend-max") as HTML
 const velocityLegendMid = document.getElementById("velocity-legend-mid") as HTMLSpanElement;
 const velocityLegendMin = document.getElementById("velocity-legend-min") as HTMLSpanElement;
 let velocityLegendDrawn = false;
+const drawRegionBtn = document.getElementById("draw-region-btn") as HTMLButtonElement;
+const clearRegionBtn = document.getElementById("clear-region-btn") as HTMLButtonElement;
+const regionPanel = document.getElementById("region-panel") as HTMLDivElement;
+const regionChart = document.getElementById("region-chart") as HTMLDivElement;
+const regionLegend = document.getElementById("region-legend") as HTMLDivElement;
+
+// Trace indices inside the drawn polygon, cached so a variable/season change
+// only re-pulls values (the polygon itself is unchanged).
+let regionIndices: number[] | null = null;
 
 let currentData: StoreData | null = null;
 let currentStore: IcechunkStore | null = null;
@@ -89,6 +109,7 @@ function buildSeasonState(data: StoreData): void {
       if (cb.checked) enabledSeasons.add(season);
       else enabledSeasons.delete(season);
       renderCurrentVariable();
+      if (hasPolygon()) updateRegionHistogram();
     });
     label.appendChild(cb);
     label.append(` ${season}`);
@@ -152,6 +173,70 @@ function syncVelocityLegend() {
   velocityLegend.hidden = !show;
 }
 
+function updateRegionHistogram(): void {
+  if (!currentData || !regionIndices || !hasPolygon()) return;
+  const variableName = variableSelect.value;
+  const varInfo = VARIABLES[variableName];
+  const values = currentData.variables[variableName];
+  if (!varInfo || !values) return;
+  const scale = varInfo.displayScale ?? 1;
+  const seasons = currentData.frameCollection;
+  const qc = currentData.qcPass;
+
+  const groups = new Map<string, number[]>();
+  const all: number[] = [];
+  for (const idx of regionIndices) {
+    if (qc && !qc[idx]) continue;
+    const v = values[idx];
+    if (isNaN(v)) continue;
+    const sv = v * scale;
+    if (seasons) {
+      const s = seasons[idx];
+      // Respect the season on/off checkboxes (enabledSeasons).
+      if (!enabledSeasons.has(s)) continue;
+      let g = groups.get(s);
+      if (!g) groups.set(s, (g = []));
+      g.push(sv);
+    }
+    all.push(sv);
+  }
+
+  const colorMap = seasonColors(seasons ? Array.from(seasons) : []);
+  const series: HistSeries[] = [];
+  for (const s of Array.from(groups.keys()).sort()) {
+    series.push({ label: s, color: colorMap.get(s) ?? "#888", values: groups.get(s)! });
+  }
+  series.push({ label: "All", color: "#e8e8e8", values: all });
+
+  regionPanel.hidden = false;
+  renderHistogram(regionChart, regionLegend, `${varInfo.label} [${varInfo.unit}]`, series);
+}
+
+function onPolygonChanged(): void {
+  const present = hasPolygon();
+  clearRegionBtn.disabled = !present;
+  drawRegionBtn.textContent = "Draw region";
+  if (present && currentData) {
+    regionIndices = tracesInPolygon(currentData);
+    updateRegionHistogram();
+  } else {
+    regionIndices = null;
+    regionPanel.hidden = true;
+    clearHistogram(regionLegend);
+  }
+}
+
+// Drop any region when the underlying dataset/snapshot changes (trace indices
+// would otherwise be stale against the new data arrays).
+function resetRegion(): void {
+  regionIndices = null;
+  regionPanel.hidden = true;
+  clearHistogram(regionLegend);
+  clearPolygon();
+  clearRegionBtn.disabled = true;
+  drawRegionBtn.textContent = "Draw region";
+}
+
 function renderCurrentVariable() {
   if (!currentData) return;
   const variableName = variableSelect.value;
@@ -197,6 +282,8 @@ async function loadSnapshot(snapshotId?: string) {
   currentSnapshotId = snapshotId;
   currentData = null;
   currentStore = null;
+  // New data arrays invalidate any cached in-polygon indices.
+  resetRegion();
 
   try {
     currentStore = await openStore(STORES[currentStoreIndex].url, snapshotId);
@@ -280,6 +367,7 @@ async function init() {
   populateDatasetSelect();
   initMap("map", STORES[currentStoreIndex].hemisphere);
   populateBasemapSelect();
+  setOnPolygonChange(onPolygonChanged);
 
   // Browsers autofill checkbox state across reloads but do not fire the change
   // event for the restored value, so sync onViewChange manually before any
@@ -338,6 +426,9 @@ async function init() {
 
   showCheckpointsCb.addEventListener("change", renderHistoryList);
 
+  drawRegionBtn.addEventListener("click", () => startPolygonDraw());
+  clearRegionBtn.addEventListener("click", () => clearPolygon());
+
   variableSelect.addEventListener("change", async () => {
     if (!currentData || !currentStore) return;
     const variableName = variableSelect.value;
@@ -347,6 +438,7 @@ async function init() {
       hideLoading();
     }
     renderCurrentVariable();
+    if (hasPolygon()) updateRegionHistogram();
   });
 }
 
