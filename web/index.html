@@ -240,6 +240,107 @@
       .leaflet-container {
         background: #1a1a2e;
       }
+
+      .region-buttons {
+        display: flex;
+        gap: 6px;
+      }
+
+      .region-buttons button {
+        flex: 1;
+        background: #0f3460;
+        color: #e6e6e6;
+        border: 1px solid #16527a;
+        border-radius: 4px;
+        padding: 6px 8px;
+        font-size: 12px;
+        cursor: pointer;
+      }
+
+      .region-buttons button:hover {
+        background: #16527a;
+      }
+
+      .region-buttons button:disabled {
+        opacity: 0.45;
+        cursor: default;
+      }
+
+      #region-panel {
+        position: absolute;
+        bottom: 30px;
+        left: 10px;
+        z-index: 999;
+        background: rgba(22, 33, 62, 0.94);
+        border: 1px solid #0f3460;
+        border-radius: 4px;
+        padding: 8px;
+      }
+
+      #region-panel[hidden] {
+        display: none;
+      }
+
+      #region-body {
+        display: flex;
+        align-items: flex-start;
+      }
+
+      #region-chart {
+        width: 460px;
+      }
+
+      #region-legend {
+        width: 150px;
+        margin-left: 8px;
+        padding-top: 22px;
+        font-size: 11px;
+        color: #ccc;
+      }
+
+      #region-legend .leg-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin-bottom: 4px;
+        line-height: 1.2;
+        padding: 1px 4px;
+        border-radius: 3px;
+      }
+
+      #region-legend .leg-swatch {
+        flex: 0 0 auto;
+        width: 16px;
+        height: 0;
+        border-top-style: solid;
+      }
+
+      #region-legend .leg-row.leg-all {
+        font-weight: 700;
+        color: #fff;
+      }
+
+      #region-legend .leg-row.leg-hi {
+        background: rgba(255, 255, 255, 0.16);
+        color: #fff;
+      }
+
+      #region-chart .region-empty {
+        color: #aaa;
+        font-size: 12px;
+        padding: 24px 12px;
+        text-align: center;
+      }
+
+      .u-title {
+        font-size: 12px;
+        color: #ccc;
+      }
+
+      .u-legend {
+        font-size: 11px;
+        color: #ccc;
+      }
     </style>
   </head>
   <body>
@@ -265,6 +366,13 @@
           <option value="bed_twtt">Bed TWTT [µs]</option>
         </select>
       </div>
+      <div class="sidebar-section">
+        <h2>Region</h2>
+        <div class="region-buttons">
+          <button id="draw-region-btn">Draw region</button>
+          <button id="clear-region-btn" disabled>Clear region</button>
+        </div>
+      </div>
       <details class="sidebar-section" id="seasons-section" hidden>
         <summary>Seasons</summary>
         <div id="season-list"></div>
@@ -284,6 +392,12 @@
     <div id="map-container">
       <div id="map"></div>
       <div id="loading-overlay">Loading data from S3...</div>
+      <div id="region-panel" hidden>
+        <div id="region-body">
+          <div id="region-chart"></div>
+          <div id="region-legend"></div>
+        </div>
+      </div>
       <div id="velocity-legend" hidden>
         <div class="legend-title" id="velocity-legend-title"></div>
         <div class="legend-row">
