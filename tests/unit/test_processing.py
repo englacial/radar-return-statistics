@@ -6,6 +6,8 @@ import scipy.constants
 
 from radar_return_statistics.processing import (
     _build_qc_checks,
+    _resolve_noise_config,
+    compute_noise_powers,
     compute_rssnr_dB,
     extract_layer_peak_power,
     peak_power_in_window,
@@ -105,6 +107,7 @@ def test_process_frame_output_variables(mocker, synthetic_frame, synthetic_layer
     assert set(ds.data_vars) == {
         "surface_twtt", "bed_twtt", "surface_elevation", "bed_elevation",
         "surface_power_dB", "bed_power_dB", "required_surface_snr_dB",
+        "pre_surface_noise_dB", "post_bed_noise_dB",
         "qc_pass", "frame_id",
     }
 
@@ -135,6 +138,76 @@ def test_process_frame_returns_none_on_layer_exception(mocker, synthetic_frame, 
 
     ds = process_frame(opr, types.SimpleNamespace(name="FRAME"), minimal_proc_config)
     assert ds is None
+
+
+def test_resolve_noise_config_fills_defaults():
+    cfg = _resolve_noise_config({})
+    assert cfg["pre_surface"]["start_offset_us"] == 1.0
+    assert cfg["pre_surface"]["end_offset_us"] == 1.0
+    assert cfg["post_bed"]["start_offset_us"] == 5.0
+    assert cfg["post_bed"]["end_offset_us"] == 5.0
+
+
+def test_resolve_noise_config_overrides_partial():
+    cfg = _resolve_noise_config({"pre_surface": {"start_offset_us": 0.25}})
+    assert cfg["pre_surface"]["start_offset_us"] == 0.25
+    # untouched keys keep defaults
+    assert cfg["pre_surface"]["end_offset_us"] == 1.0
+    assert cfg["post_bed"]["start_offset_us"] == 5.0
+
+
+def test_compute_noise_powers_matches_median(synthetic_frame, synthetic_layers):
+    """Median over the noise window in linear power should round-trip to dB."""
+    surface_twtt = synthetic_layers["standard:surface"]["twtt"].values
+    bed_twtt = synthetic_layers["standard:bottom"]["twtt"].values
+    # Tight offsets so both windows fit inside the synthetic frame's 1-20 us twtt.
+    noise_cfg = {
+        "pre_surface": {"start_offset_us": 0.5, "end_offset_us": 0.5},
+        "post_bed": {"start_offset_us": 1.0, "end_offset_us": 1.0},
+    }
+    pre, post = compute_noise_powers(
+        synthetic_frame, surface_twtt, bed_twtt, noise_cfg,
+    )
+    assert pre.shape == (synthetic_frame.dims["slow_time"],)
+    assert post.shape == (synthetic_frame.dims["slow_time"],)
+    # Synthetic background is uniform[0.001, 0.01] linear power; median sits
+    # roughly mid-range. Verify against a direct numpy computation per trace.
+    twtt = synthetic_frame.twtt.values
+    data = np.abs(synthetic_frame.Data.values)  # (slow_time, twtt)
+    for i in range(synthetic_frame.dims["slow_time"]):
+        s = surface_twtt[i]
+        b = bed_twtt[i]
+        pre_mask = (twtt >= twtt[0] + 0.5e-6) & (twtt <= s - 0.5e-6)
+        post_mask = (twtt >= b + 1.0e-6) & (twtt <= twtt[-1] - 1.0e-6)
+        expected_pre = 10 * np.log10(np.median(data[i, pre_mask]))
+        expected_post = 10 * np.log10(np.median(data[i, post_mask]))
+        np.testing.assert_allclose(pre[i], expected_pre, rtol=1e-9)
+        np.testing.assert_allclose(post[i], expected_post, rtol=1e-9)
+
+
+def test_compute_noise_powers_empty_window_returns_nan(synthetic_frame, synthetic_layers):
+    surface_twtt = synthetic_layers["standard:surface"]["twtt"].values
+    bed_twtt = synthetic_layers["standard:bottom"]["twtt"].values
+    # Offsets so large that the windows are empty for this frame.
+    noise_cfg = {
+        "pre_surface": {"start_offset_us": 100.0, "end_offset_us": 0.0},
+        "post_bed": {"start_offset_us": 100.0, "end_offset_us": 0.0},
+    }
+    pre, post = compute_noise_powers(
+        synthetic_frame, surface_twtt, bed_twtt, noise_cfg,
+    )
+    assert np.all(np.isnan(pre))
+    assert np.all(np.isnan(post))
+
+
+def test_compute_noise_powers_nan_pick_propagates(synthetic_frame, synthetic_layers):
+    surface_twtt = synthetic_layers["standard:surface"]["twtt"].values.copy()
+    bed_twtt = synthetic_layers["standard:bottom"]["twtt"].values.copy()
+    surface_twtt[0] = np.nan
+    bed_twtt[-1] = np.nan
+    pre, post = compute_noise_powers(synthetic_frame, surface_twtt, bed_twtt, {})
+    assert np.isnan(pre[0])
+    assert np.isnan(post[-1])
 
 
 def test_rssnr_matches_geometric_spreading_formula(mocker, synthetic_frame, synthetic_layers, minimal_proc_config):

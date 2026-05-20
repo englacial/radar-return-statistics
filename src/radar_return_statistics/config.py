@@ -27,6 +27,15 @@ def load_config(config_path: str | Path) -> dict:
     # Commit a checkpoint every N successfully-stored frames so a long pipeline
     # run survives a crash. Set to 0 (or null) to disable and only commit at end.
     config["processing"].setdefault("checkpoint_every", 1000)
+
+    # Noise-power window offsets (microseconds of two-way travel time).
+    noise = config["processing"].setdefault("noise", {})
+    pre = noise.setdefault("pre_surface", {})
+    pre.setdefault("start_offset_us", 1.0)
+    pre.setdefault("end_offset_us", 1.0)
+    post = noise.setdefault("post_bed", {})
+    post.setdefault("start_offset_us", 5.0)
+    post.setdefault("end_offset_us", 5.0)
     config.setdefault("qc", {})
     config["qc"].setdefault("max_heading_change_deg_per_km", None)
     config["qc"].setdefault("min_ice_thickness_m", None)

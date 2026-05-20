@@ -22,6 +22,13 @@ processing:
   layer_margin_m: 50
   ice_permittivity: 3.17
   max_workers: 20
+  noise:
+    pre_surface:
+      start_offset_us: 1.0   # window starts this far after twtt_axis[0]
+      end_offset_us: 1.0     # window ends this far before surface pick
+    post_bed:
+      start_offset_us: 5.0   # window starts this far after bed pick
+      end_offset_us: 5.0     # window ends this far before twtt_axis[-1]
 
 qc:
   max_heading_change_deg_per_km: 2.0  # mask traces with heading change above this (deg/km)

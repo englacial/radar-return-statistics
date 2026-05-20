@@ -12,6 +12,24 @@ logger = logging.getLogger(__name__)
 SURFACE_KEY = "standard:surface"
 BED_KEY = "standard:bottom"
 
+DEFAULT_NOISE_CONFIG = {
+    "pre_surface": {"start_offset_us": 1.0, "end_offset_us": 1.0},
+    "post_bed": {"start_offset_us": 5.0, "end_offset_us": 5.0},
+}
+
+
+def _resolve_noise_config(noise_config):
+    """Fill in defaults for any missing noise-config keys."""
+    out = {k: dict(v) for k, v in DEFAULT_NOISE_CONFIG.items()}
+    if not noise_config:
+        return out
+    for window in ("pre_surface", "post_bed"):
+        section = noise_config.get(window) or {}
+        for key in ("start_offset_us", "end_offset_us"):
+            if key in section:
+                out[window][key] = section[key]
+    return out
+
 
 def peak_power_in_window(data_linear, twtt_axis, pick_twtt, margin_twtt):
     """Peak power (dB) within margin_twtt of pick_twtt. Returns nan if window is empty."""
@@ -38,6 +56,67 @@ def compute_rssnr_dB(surface_power_dB, bed_power_dB, surface_twtt, bed_twtt, ice
     P_bed_lin = 10.0 ** (bed_power_dB / 10.0)
     with np.errstate(divide="ignore", invalid="ignore"):
         return 10.0 * np.log10(P_surf_lin * r_surf**2 / (P_bed_lin * r_bed_eff**2))
+
+
+def compute_noise_powers(frame, surface_twtt_aligned, bed_twtt_aligned, noise_config):
+    """Per-trace median noise power (dB) in pre-surface and post-bed windows.
+
+    `surface_twtt_aligned` and `bed_twtt_aligned` must be 1-D numpy arrays whose
+    indices line up with `frame.slow_time`. Window edges are configured by
+    offsets in microseconds:
+      pre_surface  = [twtt[0] + pre.start_offset_us, surface - pre.end_offset_us]
+      post_bed     = [bed + post.start_offset_us, twtt[-1] - post.end_offset_us]
+    Median is taken on linear power within the window and converted to dB.
+    Empty / invalid windows return nan.
+    """
+    cfg = _resolve_noise_config(noise_config)
+    pre_start = cfg["pre_surface"]["start_offset_us"] * 1e-6
+    pre_end = cfg["pre_surface"]["end_offset_us"] * 1e-6
+    post_start = cfg["post_bed"]["start_offset_us"] * 1e-6
+    post_end = cfg["post_bed"]["end_offset_us"] * 1e-6
+
+    twtt = frame.twtt.values
+    data_lin = np.abs(frame.Data.values)
+    # Data may be (slow_time, twtt) or (twtt, slow_time); normalize to (twtt, traces)
+    if data_lin.shape[0] != twtt.size and data_lin.shape[1] == twtt.size:
+        data_lin = data_lin.T
+    assert data_lin.shape[0] == twtt.size, "Data twtt dimension does not match frame.twtt"
+
+    n_traces = data_lin.shape[1]
+    pre_noise = np.full(n_traces, np.nan)
+    post_noise = np.full(n_traces, np.nan)
+
+    twtt_first = twtt[0]
+    twtt_last = twtt[-1]
+    pre_lo = twtt_first + pre_start
+    post_hi = twtt_last - post_end
+
+    surface = np.asarray(surface_twtt_aligned)
+    bed = np.asarray(bed_twtt_aligned)
+
+    for i in range(n_traces):
+        s = surface[i]
+        if np.isfinite(s):
+            pre_hi = s - pre_end
+            if pre_hi > pre_lo:
+                mask = (twtt >= pre_lo) & (twtt <= pre_hi)
+                if mask.any():
+                    samples = data_lin[mask, i]
+                    samples = samples[np.isfinite(samples)]
+                    if samples.size:
+                        pre_noise[i] = 10.0 * np.log10(np.median(samples))
+        b = bed[i]
+        if np.isfinite(b):
+            post_lo = b + post_start
+            if post_hi > post_lo:
+                mask = (twtt >= post_lo) & (twtt <= post_hi)
+                if mask.any():
+                    samples = data_lin[mask, i]
+                    samples = samples[np.isfinite(samples)]
+                    if samples.size:
+                        post_noise[i] = 10.0 * np.log10(np.median(samples))
+
+    return pre_noise, post_noise
 
 
 def extract_layer_peak_power(radar_ds, layer_twtt, margin_twtt):
@@ -177,6 +256,21 @@ def process_frame(opr: OPRConnection, stac_item, config: dict) -> xr.Dataset | N
             surface_power, bed_power, surface_twtt, bed_twtt, ice_permittivity
         )
 
+        # Noise power in pre-surface and post-bed windows. Uses the layer-pick
+        # twtts already aligned to frame.slow_time as the window anchors.
+        noise_config = proc.get("noise", {})
+        pre_noise_arr, post_noise_arr = compute_noise_powers(
+            frame, frame[SURFACE_KEY].values, frame[BED_KEY].values, noise_config,
+        )
+        pre_surface_noise_dB = xr.DataArray(
+            pre_noise_arr, dims=("slow_time",),
+            coords={"slow_time": frame.slow_time},
+        )
+        post_bed_noise_dB = xr.DataArray(
+            post_noise_arr, dims=("slow_time",),
+            coords={"slow_time": frame.slow_time},
+        )
+
         if qc_mask is not None:
             qc_pass = qc_mask
         else:
@@ -190,6 +284,8 @@ def process_frame(opr: OPRConnection, stac_item, config: dict) -> xr.Dataset | N
             "surface_power_dB": surface_power,
             "bed_power_dB": bed_power,
             "required_surface_snr_dB": required_surface_snr_dB,
+            "pre_surface_noise_dB": pre_surface_noise_dB,
+            "post_bed_noise_dB": post_bed_noise_dB,
         }
 
         if qc_mask is not None:

@@ -66,6 +66,16 @@ export const VARIABLES: Record<string, VariableInfo> = {
     cmap: "turbo",
     unit: "dB",
   },
+  pre_surface_noise_dB: {
+    label: "Pre-Surface Noise",
+    cmap: "turbo",
+    unit: "dB",
+  },
+  post_bed_noise_dB: {
+    label: "Post-Bed Noise",
+    cmap: "turbo",
+    unit: "dB",
+  },
   surface_twtt: {
     label: "Surface TWTT",
     cmap: "turbo",

@@ -12,6 +12,7 @@ pytestmark = pytest.mark.integration
 EXPECTED_VARS = {
     "surface_twtt", "bed_twtt", "surface_elevation", "bed_elevation",
     "surface_power_dB", "bed_power_dB", "required_surface_snr_dB",
+    "pre_surface_noise_dB", "post_bed_noise_dB",
     "qc_pass", "frame_id",
 }
 

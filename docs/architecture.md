@@ -14,6 +14,13 @@ Per-trace (resampled) values stored with `slow_time` dimension:
 * `bed_power_dB` - bed peak power in dB
 * `required_surface_snr_dB` - surface-to-bed power ratio corrected for geometric spreading (dB);
   matches RSSNR definition from https://github.com/thomasteisberg/required_surface_snr
+* `pre_surface_noise_dB` - median power (dB) in a window before the surface pick, used
+  as a noise-floor estimate. Window is `[twtt[0] + pre_surface.start_offset_us,
+  surface - pre_surface.end_offset_us]`.
+* `post_bed_noise_dB` - median power (dB) in a window after the bed pick. Window is
+  `[bed + post_bed.start_offset_us, twtt[-1] - post_bed.end_offset_us]`.
+  Both noise variables are configured by `processing.noise` (defaults: pre 1/1 us,
+  post 5/5 us). NaN if the requested window is empty for that trace.
 * `frame_id` - source frame identifier
 
 Coordinates: `latitude`, `longitude`, `elevation`
