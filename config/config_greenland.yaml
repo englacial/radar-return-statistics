@@ -24,6 +24,13 @@ processing:
   layer_margin_m: 50
   ice_permittivity: 3.17
   max_workers: 4
+  noise:
+    pre_surface:
+      start_offset_us: 1.0
+      end_offset_us: 1.0
+    post_bed:
+      start_offset_us: 5.0
+      end_offset_us: 5.0
 
 qc:
   max_heading_change_deg_per_km: 2.0
