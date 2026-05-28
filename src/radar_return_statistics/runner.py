@@ -1,4 +1,5 @@
 import logging
+import multiprocessing
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import aiohttp
@@ -182,7 +183,11 @@ def run(config_path: str | None = None, *, config: dict | None = None, reprocess
     batch_count = 0
     batch_frame_collections: dict[str, str] = {}
 
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+    # Use 'spawn' so workers don't inherit thread state (icechunk's tokio
+    # runtime, aiohttp clients, etc.) from the parent. Fork+threads can
+    # deadlock or crash the child, surfacing as BrokenProcessPool.
+    mp_ctx = multiprocessing.get_context("spawn")
+    with ProcessPoolExecutor(max_workers=max_workers, mp_context=mp_ctx) as executor:
         futures = {}
         for fid in new_frame_ids:
             row = frames_gdf.loc[fid]
@@ -225,9 +230,19 @@ def run(config_path: str | None = None, *, config: dict | None = None, reprocess
                 batch_count = 0
                 batch_frame_collections = {}
 
-    if total_frames_written == 0 and not session_dirty:
-        logger.warning("No frames produced results")
-        return
+    if total_frames_written == 0:
+        if reprocess:
+            # The store was cleared at the top of the run. Committing now would
+            # persist an empty store. Bail without commit so the prior snapshot
+            # remains the tip of main.
+            raise RuntimeError(
+                f"Reprocess attempted on {total_to_process} frames but none "
+                "succeeded — aborting without commit; store unchanged."
+            )
+        if not session_dirty:
+            logger.warning("No frames produced results")
+            return
+        # session is dirty only from orphan-frame removal — fall through to commit.
 
     # Final [run] commit — handles trailing batch + always emits a single
     # entry per run for the viewer (which hides [checkpoint] entries).
