@@ -32,7 +32,7 @@ processing:
 
 qc:
   max_heading_change_deg_per_km: 2.0  # mask traces with heading change above this (deg/km)
-  min_ice_thickness_m: 100           # skip traces below this ice thickness (e.g. 500)
+  min_ice_thickness_m: null           # skip traces below this ice thickness (e.g. 500)
   min_agl_m: 50                     # skip traces where AGL is below this (e.g. 100)
   min_bed_snr_db: null                # skip traces where bed SNR is below this (e.g. 5.0)
   min_traces_after_qc: 15             # skip frame entirely if fewer traces survive QC
