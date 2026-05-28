@@ -3,10 +3,8 @@ opr:
 
 region:
   area: "greenland"
-  # No subregion filter — full Greenland geometry.
 
 query:
-  # Recent P3 Greenland seasons — adding incrementally working backwards.
   collections:
     # 2012_Greenland_P3 and earlier broadly lack the 'Heading' variable that
     # xopr turn-rejection QC requires, so they yield zero usable frames.
@@ -23,7 +21,7 @@ processing:
   decimate_interval: "10s"
   layer_margin_m: 50
   ice_permittivity: 3.17
-  max_workers: 4
+  max_workers: 8
   noise:
     pre_surface:
       start_offset_us: 1.0
@@ -34,7 +32,7 @@ processing:
 
 qc:
   max_heading_change_deg_per_km: 2.0
-  min_ice_thickness_m: 100
+  min_ice_thickness_m: null
   min_agl_m: 50
   min_bed_snr_db: null
   min_traces_after_qc: 15
@@ -44,4 +42,4 @@ store:
   s3_bucket: "opr-radar-metrics"
   s3_prefix: "icechunk/greenland"
   s3_region: "us-west-2"
-  remove_out_of_scope: false  # set true once we're confident the season list is final
+  remove_out_of_scope: false
