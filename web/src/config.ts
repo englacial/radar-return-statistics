@@ -8,6 +8,11 @@ export interface StoreConfig {
 
 export const STORES: StoreConfig[] = [
   {
+    label: "Antarctica",
+    url: "https://opr-radar-metrics.s3.us-west-2.amazonaws.com/icechunk/antarctica/",
+    hemisphere: "antarctic",
+  },
+  {
     label: "Amundsen Sea Embayment",
     url: "https://opr-radar-metrics.s3.us-west-2.amazonaws.com/icechunk/ase/",
     hemisphere: "antarctic",
