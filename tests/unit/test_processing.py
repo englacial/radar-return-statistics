@@ -131,6 +131,27 @@ def test_process_frame_returns_none_on_missing_bed_layer(mocker, synthetic_frame
     assert ds is None
 
 
+def test_process_frame_bed_fallback_key(mocker, synthetic_frame, synthetic_layers, minimal_proc_config):
+    """Bed picks published under ':bottom' (e.g. 2019_Antarctica_GV) are used when
+    'standard:bottom' is absent, producing the same output."""
+    opr = mocker.MagicMock()
+    opr.load_frame.return_value = synthetic_frame
+    opr.get_layers.return_value = synthetic_layers
+
+    expected = process_frame(opr, types.SimpleNamespace(name="FRAME"), minimal_proc_config)
+
+    fallback_layers = dict(synthetic_layers)
+    fallback_layers[":bottom"] = fallback_layers.pop("standard:bottom")
+    opr.load_frame.return_value = synthetic_frame
+    opr.get_layers.return_value = fallback_layers
+
+    ds = process_frame(opr, types.SimpleNamespace(name="FRAME"), minimal_proc_config)
+
+    assert ds is not None
+    for var in ("bed_twtt", "bed_power_dB", "required_surface_snr_dB"):
+        np.testing.assert_array_equal(ds[var].values, expected[var].values)
+
+
 def test_process_frame_returns_none_on_layer_exception(mocker, synthetic_frame, minimal_proc_config):
     opr = mocker.MagicMock()
     opr.load_frame.return_value = synthetic_frame

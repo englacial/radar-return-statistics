@@ -11,6 +11,9 @@ logger = logging.getLogger(__name__)
 
 SURFACE_KEY = "standard:surface"
 BED_KEY = "standard:bottom"
+# Some seasons (e.g. 2019_Antarctica_GV) publish bed picks under an empty-prefix
+# layer group; fall back to it when the standard key is absent.
+BED_FALLBACK_KEY = ":bottom"
 
 DEFAULT_NOISE_CONFIG = {
     "pre_surface": {"start_offset_us": 1.0, "end_offset_us": 1.0},
@@ -201,21 +204,30 @@ def process_frame(opr: OPRConnection, stac_item, config: dict) -> xr.Dataset | N
             logger.warning("Frame %s: failed to load layers, skipping", frame_id)
             return None
 
-        if layers is None or SURFACE_KEY not in layers or BED_KEY not in layers:
+        bed_key = None
+        if layers is not None:
+            bed_key = BED_KEY if BED_KEY in layers else (
+                BED_FALLBACK_KEY if BED_FALLBACK_KEY in layers else None
+            )
+        if layers is None or SURFACE_KEY not in layers or bed_key is None:
             available = list(layers.keys()) if layers else []
             logger.warning("Frame %s: missing layer picks (available: %s), skipping",
                            frame_id, available)
             return None
+        if bed_key != BED_KEY:
+            logger.info("Frame %s: using bed layer %r (no %r)", frame_id, bed_key, BED_KEY)
 
-        # Add layer picks to frame so xopr QC checks can use them
-        for key in (SURFACE_KEY, BED_KEY):
-            pick = layers[key]["twtt"].reindex(
+        # Add layer picks to frame so xopr QC checks can use them. The bed pick is
+        # always stored under BED_KEY regardless of source key, since xopr QC
+        # checks look it up by that name.
+        for frame_key, layer_key in ((SURFACE_KEY, SURFACE_KEY), (BED_KEY, bed_key)):
+            pick = layers[layer_key]["twtt"].reindex(
                 slow_time=frame.slow_time,
                 method="nearest",
                 tolerance=pd.Timedelta(seconds=5),
                 fill_value=np.nan,
             )
-            frame[key] = pick
+            frame[frame_key] = pick
 
         # Run xopr QC checks (picks already in frame, ensure_picks is a no-op)
         qc_checks = _build_qc_checks(qc_config)
@@ -244,7 +256,7 @@ def process_frame(opr: OPRConnection, stac_item, config: dict) -> xr.Dataset | N
             frame, layers[SURFACE_KEY]["twtt"], margin_twtt
         )
         bed_twtt, bed_power = extract_layer_peak_power(
-            frame, layers[BED_KEY]["twtt"], margin_twtt
+            frame, layers[bed_key]["twtt"], margin_twtt
         )
 
         surface_elevation = frame.Elevation - (c / 2) * surface_twtt

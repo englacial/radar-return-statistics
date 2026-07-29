@@ -41,4 +41,4 @@ markers = [
 ]
 
 [tool.uv.sources]
-xopr = { git = "https://github.com/thomasteisberg/xopr", branch = "thomas/qc_and_extras" }
+xopr = { git = "https://github.com/englacial/xopr", branch = "main" }

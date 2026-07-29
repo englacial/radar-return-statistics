@@ -2398,7 +2398,7 @@ requires-dist = [
     { name = "scipy" },
     { name = "seaborn", specifier = ">=0.13.2" },
     { name = "xarray", specifier = ">=2025.1.1" },
-    { name = "xopr", git = "https://github.com/thomasteisberg/xopr?branch=thomas%2Fqc_and_extras" },
+    { name = "xopr", git = "https://github.com/englacial/xopr?branch=main" },
     { name = "zarr", specifier = ">=3" },
 ]
 provides-extras = ["test"]
@@ -2708,8 +2708,8 @@ wheels = [
 
 [[package]]
 name = "xopr"
-version = "0.4.4.dev19+gba83123e8"
-source = { git = "https://github.com/thomasteisberg/xopr?branch=thomas%2Fqc_and_extras#ba83123e856f1a4438c5c88cbf55b4d313faeea4" }
+version = "0.5.1.dev27+g86b361254"
+source = { git = "https://github.com/englacial/xopr?branch=main#86b361254bb0c35cd8658c8e303df2c94c35c2c8" }
 dependencies = [
     { name = "aiohttp" },
     { name = "antimeridian" },
