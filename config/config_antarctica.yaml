@@ -1,0 +1,60 @@
+opr:
+  # Streaming (no cache): the full-continent run would otherwise add several
+  # hundred GB to radar_cache/, which doesn't fit on this machine.
+  cache_dir: null
+
+region:
+  area: "antarctic"
+
+query:
+  # All Antarctic airborne seasons with layer picks and the Heading variable.
+  # Excluded: 2004_P3chile (no OPR layer picks), 2009-2011 DC8/TO (missing Heading),
+  # 2018_Ground and 2024_GroundGHOST2 (ground traverses).
+  # BaslerJKB (UTIG) seasons are included here at 10s decimation; the separate
+  # 'utig' store keeps them at 5s.
+  collections:
+    - "2008_Antarctica_BaslerJKB"
+    - "2012_Antarctica_DC8"
+    - "2013_Antarctica_Basler"
+    - "2013_Antarctica_P3"
+    - "2014_Antarctica_DC8"
+    - "2016_Antarctica_BaslerJKB"
+    - "2016_Antarctica_DC8"
+    - "2017_Antarctica_Basler"
+    - "2017_Antarctica_BaslerJKB"
+    - "2017_Antarctica_P3"
+    - "2018_Antarctica_BaslerJKB"
+    - "2018_Antarctica_DC8"
+    - "2019_Antarctica_GV"
+    - "2022_Antarctica_BaslerMKB"
+    - "2023_Antarctica_BaslerMKB"
+  max_items: null
+
+processing:
+  data_product: "CSARP_standard"
+  decimate_interval: "10s"
+  layer_margin_m: 50
+  ice_permittivity: 3.17
+  max_workers: 20
+  checkpoint_every: 200
+  noise:
+    pre_surface:
+      start_offset_us: 1.0
+      end_offset_us: 1.0
+    post_bed:
+      start_offset_us: 5.0
+      end_offset_us: 5.0
+
+qc:
+  max_heading_change_deg_per_km: 2.0
+  min_ice_thickness_m: 100
+  min_agl_m: 50
+  min_bed_snr_db: null
+  min_traces_after_qc: 15
+
+store:
+  backend: "s3"
+  s3_bucket: "opr-radar-metrics"
+  s3_prefix: "icechunk/antarctica"
+  s3_region: "us-west-2"
+  remove_out_of_scope: false
