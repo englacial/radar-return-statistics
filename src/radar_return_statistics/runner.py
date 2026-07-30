@@ -182,6 +182,10 @@ def run(config_path: str | None = None, *, config: dict | None = None, reprocess
     # Per-checkpoint state — flushed at each checkpoint commit.
     batch_count = 0
     batch_frame_collections: dict[str, str] = {}
+    batch_frame_attrs: dict[str, dict[str, float]] = {
+        "frame_bed_pick_fraction": {},
+        "segment_bed_pick_fraction": {},
+    }
 
     # Use 'spawn' so workers don't inherit thread state (icechunk's tokio
     # runtime, aiohttp clients, etc.) from the parent. Fork+threads can
@@ -215,10 +219,17 @@ def run(config_path: str | None = None, *, config: dict | None = None, reprocess
                 col = str(ds.attrs["collection"])
                 batch_frame_collections[fid] = col
                 all_collections.add(col)
+            for attr_name in batch_frame_attrs:
+                if attr_name in ds.attrs:
+                    batch_frame_attrs[attr_name][fid] = float(ds.attrs[attr_name])
             logger.info("Completed frame %s (%d/%d)", fid, total_frames_written, total_to_process)
 
             if checkpoint_every and batch_count >= checkpoint_every:
-                store.update_frame_index(session, frame_collections=batch_frame_collections or None)
+                store.update_frame_index(
+                    session,
+                    frame_collections=batch_frame_collections or None,
+                    frame_scalar_attrs={k: v for k, v in batch_frame_attrs.items() if v} or None,
+                )
                 cp_msg = (
                     f"[checkpoint] {total_frames_written}/{total_to_process} frames "
                     f"({total_traces_written} traces) — "
@@ -229,6 +240,7 @@ def run(config_path: str | None = None, *, config: dict | None = None, reprocess
                 session_dirty = False
                 batch_count = 0
                 batch_frame_collections = {}
+                batch_frame_attrs = {k: {} for k in batch_frame_attrs}
 
     if total_frames_written == 0:
         if reprocess:
@@ -246,7 +258,11 @@ def run(config_path: str | None = None, *, config: dict | None = None, reprocess
 
     # Final [run] commit — handles trailing batch + always emits a single
     # entry per run for the viewer (which hides [checkpoint] entries).
-    store.update_frame_index(session, frame_collections=batch_frame_collections or None)
+    store.update_frame_index(
+        session,
+        frame_collections=batch_frame_collections or None,
+        frame_scalar_attrs={k: v for k, v in batch_frame_attrs.items() if v} or None,
+    )
 
     parts = []
     if orphaned_frames and remove_out_of_scope:

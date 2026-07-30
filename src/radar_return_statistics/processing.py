@@ -1,4 +1,5 @@
 import logging
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -15,9 +16,19 @@ BED_KEY = "standard:bottom"
 # layer group; fall back to it when the standard key is absent.
 BED_FALLBACK_KEY = ":bottom"
 
+# QC checks that do not depend on layer picks. Traces passing these are usable
+# surface observations even when the bed pick is missing — the basis for
+# treating missing bed picks as censored (low-SNR) observations downstream.
+PICK_INDEPENDENT_CHECKS = ("heading_change", "minimum_agl")
+
+# Tolerance for aligning layer picks to (decimated) trace times during peak
+# extraction and pick-availability bookkeeping.
+PICK_ALIGN_TOLERANCE_S = 1
+
 DEFAULT_NOISE_CONFIG = {
     "pre_surface": {"start_offset_us": 1.0, "end_offset_us": 1.0},
     "post_bed": {"start_offset_us": 5.0, "end_offset_us": 5.0},
+    "record_tail": {"duration_us": 5.0},
 }
 
 
@@ -26,9 +37,9 @@ def _resolve_noise_config(noise_config):
     out = {k: dict(v) for k, v in DEFAULT_NOISE_CONFIG.items()}
     if not noise_config:
         return out
-    for window in ("pre_surface", "post_bed"):
+    for window, defaults in DEFAULT_NOISE_CONFIG.items():
         section = noise_config.get(window) or {}
-        for key in ("start_offset_us", "end_offset_us"):
+        for key in defaults:
             if key in section:
                 out[window][key] = section[key]
     return out
@@ -122,8 +133,51 @@ def compute_noise_powers(frame, surface_twtt_aligned, bed_twtt_aligned, noise_co
     return pre_noise, post_noise
 
 
+def _nan_peak_pair(radar_ds):
+    """All-NaN (peak_twtt, peak_power) pair aligned to radar_ds.slow_time."""
+    nan = xr.DataArray(
+        np.full(radar_ds.sizes["slow_time"], np.nan),
+        dims=("slow_time",),
+        coords={"slow_time": radar_ds.slow_time},
+    )
+    return nan, nan.copy()
+
+
+def compute_record_tail_noise(frame, noise_config):
+    """Per-trace median power (dB) in the final ``record_tail.duration_us`` of
+    the record.
+
+    Pick-independent: defined whether or not a bed pick exists, giving every
+    trace a noise-floor estimate from below the ice. Where deep returns reach
+    the record end this is an upper bound on the true noise floor (which makes
+    censoring bounds derived from it conservative).
+    """
+    cfg = _resolve_noise_config(noise_config)
+    duration = cfg["record_tail"]["duration_us"] * 1e-6
+
+    twtt = frame.twtt.values
+    data_lin = np.abs(frame.Data.values)
+    if data_lin.shape[0] != twtt.size and data_lin.shape[1] == twtt.size:
+        data_lin = data_lin.T
+
+    n_traces = data_lin.shape[1]
+    mask = twtt >= twtt[-1] - duration
+    if not mask.any():
+        return np.full(n_traces, np.nan)
+    with np.errstate(all="ignore"), warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)  # all-NaN slices
+        med = np.nanmedian(data_lin[mask, :], axis=0)
+        return 10.0 * np.log10(med)
+
+
 def extract_layer_peak_power(radar_ds, layer_twtt, margin_twtt):
-    """Extract peak power (dB) and its TWTT within a margin around a layer pick."""
+    """Extract peak power (dB) and its TWTT within a margin around a layer pick.
+
+    Traces with no pick (or no samples within the margin) return NaN. A layer
+    with no finite picks at all returns all-NaN without touching the data.
+    """
+    if not np.isfinite(np.asarray(layer_twtt.values, dtype=float)).any():
+        return _nan_peak_pair(radar_ds)
     t_start = np.minimum(radar_ds.slow_time.min(), layer_twtt.slow_time.min())
     t_end = np.maximum(radar_ds.slow_time.max(), layer_twtt.slow_time.max())
     layer_twtt = layer_twtt.sel(slow_time=slice(t_start, t_end))
@@ -141,6 +195,8 @@ def extract_layer_peak_power(radar_ds, layer_twtt, margin_twtt):
         (radar_ds.twtt >= start_twtt) & (radar_ds.twtt <= end_twtt),
         drop=True,
     )
+    if data_within_margin.sizes.get("twtt", 0) == 0:
+        return _nan_peak_pair(radar_ds)
 
     power_dB = 10 * np.log10(np.abs(data_within_margin.Data))
     peak_twtt_index = power_dB.argmax(dim="twtt")
@@ -217,6 +273,15 @@ def process_frame(opr: OPRConnection, stac_item, config: dict) -> xr.Dataset | N
         if bed_key != BED_KEY:
             logger.info("Frame %s: using bed layer %r (no %r)", frame_id, bed_key, BED_KEY)
 
+        # Segment-level picking effort: a bed layer with zero finite picks is
+        # equivalent to no bed layer (picking never attempted) — skip so these
+        # flights can't contaminate downstream missingness estimates.
+        seg_bed_twtt = np.asarray(layers[bed_key]["twtt"].values, dtype=float)
+        segment_bed_pick_fraction = float(np.isfinite(seg_bed_twtt).mean()) if seg_bed_twtt.size else 0.0
+        if segment_bed_pick_fraction == 0.0:
+            logger.warning("Frame %s: bed layer present but contains no picks, skipping", frame_id)
+            return None
+
         # Add layer picks to frame so xopr QC checks can use them. The bed pick is
         # always stored under BED_KEY regardless of source key, since xopr QC
         # checks look it up by that name.
@@ -229,23 +294,75 @@ def process_frame(opr: OPRConnection, stac_item, config: dict) -> xr.Dataset | N
             )
             frame[frame_key] = pick
 
-        # Run xopr QC checks (picks already in frame, ensure_picks is a no-op)
+        # Pre-QC bed pick availability at the extraction tolerance — the ground
+        # truth for "was a bed pick present for this trace".
+        align_tol = pd.Timedelta(seconds=PICK_ALIGN_TOLERANCE_S)
+        bed_pick_aligned = layers[bed_key]["twtt"].reindex(
+            slow_time=frame.slow_time, method="nearest",
+            tolerance=align_tol, fill_value=np.nan,
+        )
+        bed_pick_available = xr.DataArray(
+            np.isfinite(np.asarray(bed_pick_aligned.values, dtype=float)),
+            dims=("slow_time",), coords={"slow_time": frame.slow_time},
+        )
+
+        # Picking-attempted span: traces before the segment's first finite bed
+        # pick or after its last are excluded from the missingness signal —
+        # leading/trailing gaps are usually segment-edge quirks, not low SNR.
+        seg_pick_times = layers[bed_key]["twtt"].slow_time.values[np.isfinite(seg_bed_twtt)]
+        st = frame.slow_time.values
+        attempted = (st >= seg_pick_times.min()) & (st <= seg_pick_times.max())
+        attempted |= bed_pick_available.values  # available always implies attempted
+        bed_pick_attempted = xr.DataArray(
+            attempted, dims=("slow_time",), coords={"slow_time": frame.slow_time},
+        )
+
+        # OPR per-point quality flag (1 good / 2 moderate / 3 derived) where the
+        # layer source provides it; -1 where no pick or flag unavailable.
+        quality_vals = np.full(len(frame.slow_time), -1, dtype=np.int8)
+        try:
+            quality_src = layers[bed_key]["quality"]
+            q = quality_src.reindex(
+                slow_time=frame.slow_time, method="nearest",
+                tolerance=align_tol, fill_value=np.nan,
+            ).values.astype(float)
+            valid = np.isfinite(q) & bed_pick_available.values
+            quality_vals[valid] = q[valid].astype(np.int8)
+        except (KeyError, TypeError):
+            pass
+        bed_pick_quality = xr.DataArray(
+            quality_vals, dims=("slow_time",), coords={"slow_time": frame.slow_time},
+        )
+
+        # Run xopr QC checks (picks already in frame, ensure_picks is a no-op).
+        # Pick-independent checks (heading, AGL) gate surface metrics and frame
+        # retention; the full combined mask additionally gates bed metrics.
+        all_true = xr.DataArray(
+            np.ones(len(frame.slow_time), dtype=bool),
+            dims=("slow_time",), coords={"slow_time": frame.slow_time},
+        )
         qc_checks = _build_qc_checks(qc_config)
         if qc_checks:
             frame = xopr_qc.run_qc(frame, checks=qc_checks)
             qc_mask = frame["qc"]
+            qc_heading_pass = frame["qc_heading_change"] if "qc_heading_change" in frame else all_true
+            qc_agl_pass = frame["qc_minimum_agl"] if "qc_minimum_agl" in frame else all_true
+            qc_surface = qc_heading_pass & qc_agl_pass
 
-            n_pass = int(qc_mask.sum())
-            n_total = len(qc_mask)
+            n_pass = int(qc_surface.sum())
+            n_total = len(qc_surface)
             min_traces = qc_config.get("min_traces_after_qc", 10)
             if n_pass < min_traces:
-                logger.warning("Frame %s: only %d/%d traces pass QC (need %d), skipping",
-                               frame_id, n_pass, n_total, min_traces)
+                logger.warning(
+                    "Frame %s: only %d/%d traces pass pick-independent QC (need %d), skipping",
+                    frame_id, n_pass, n_total, min_traces)
                 return None
-            if n_pass < n_total:
-                logger.info("Frame %s: QC filtered %d/%d traces", frame_id, n_total - n_pass, n_total)
+            if int(qc_mask.sum()) < n_total:
+                logger.info("Frame %s: QC filtered %d/%d traces",
+                            frame_id, n_total - int(qc_mask.sum()), n_total)
         else:
             qc_mask = None
+            qc_heading_pass = qc_agl_pass = qc_surface = all_true
 
         ice_permittivity = proc["ice_permittivity"]
         c = scipy.constants.c
@@ -258,6 +375,10 @@ def process_frame(opr: OPRConnection, stac_item, config: dict) -> xr.Dataset | N
         bed_twtt, bed_power = extract_layer_peak_power(
             frame, layers[bed_key]["twtt"], margin_twtt
         )
+        # Bed metrics are only defined where a pick exists (extraction can
+        # otherwise land on spurious peaks for pickless traces).
+        bed_twtt = bed_twtt.where(bed_pick_available)
+        bed_power = bed_power.where(bed_pick_available)
 
         surface_elevation = frame.Elevation - (c / 2) * surface_twtt
         bed_elevation = surface_elevation - (v_ice / 2) * (bed_twtt - surface_twtt)
@@ -282,32 +403,46 @@ def process_frame(opr: OPRConnection, stac_item, config: dict) -> xr.Dataset | N
             post_noise_arr, dims=("slow_time",),
             coords={"slow_time": frame.slow_time},
         )
+        record_tail_noise_dB = xr.DataArray(
+            compute_record_tail_noise(frame, noise_config), dims=("slow_time",),
+            coords={"slow_time": frame.slow_time},
+        )
 
-        if qc_mask is not None:
-            qc_pass = qc_mask
-        else:
-            qc_pass = xr.ones_like(frame.slow_time, dtype=bool)
+        qc_pass = qc_mask if qc_mask is not None else all_true
 
-        metric_vars = {
+        # Surface-side metrics are masked only by pick-independent QC so that
+        # traces missing a bed pick (or failing thin-ice / bed-SNR checks) keep
+        # the surface power and noise floor needed to treat the missing bed as
+        # a censored observation. Bed-side metrics use the full QC mask.
+        surface_side = {
             "surface_twtt": surface_twtt,
-            "bed_twtt": bed_twtt,
             "surface_elevation": surface_elevation,
-            "bed_elevation": bed_elevation,
             "surface_power_dB": surface_power,
+            "pre_surface_noise_dB": pre_surface_noise_dB,
+            "record_tail_noise_dB": record_tail_noise_dB,
+        }
+        bed_side = {
+            "bed_twtt": bed_twtt,
+            "bed_elevation": bed_elevation,
             "bed_power_dB": bed_power,
             "required_surface_snr_dB": required_surface_snr_dB,
-            "pre_surface_noise_dB": pre_surface_noise_dB,
             "post_bed_noise_dB": post_bed_noise_dB,
         }
-
         if qc_mask is not None:
-            for name in metric_vars:
-                metric_vars[name] = metric_vars[name].where(qc_pass)
+            surface_side = {k: v.where(qc_surface) for k, v in surface_side.items()}
+            bed_side = {k: v.where(qc_pass) for k, v in bed_side.items()}
 
         ds = xr.Dataset(
             {
-                **metric_vars,
+                **surface_side,
+                **bed_side,
                 "qc_pass": qc_pass,
+                "qc_surface_pass": qc_surface,
+                "qc_heading_pass": qc_heading_pass,
+                "qc_agl_pass": qc_agl_pass,
+                "bed_pick_available": bed_pick_available,
+                "bed_pick_attempted": bed_pick_attempted,
+                "bed_pick_quality": bed_pick_quality,
                 "frame_id": ("slow_time", [str(frame_id)] * len(frame.slow_time)),
             },
             coords={
@@ -315,6 +450,8 @@ def process_frame(opr: OPRConnection, stac_item, config: dict) -> xr.Dataset | N
                 "longitude": frame.Longitude,
             },
         )
+        ds.attrs["frame_bed_pick_fraction"] = float(bed_pick_available.values.mean())
+        ds.attrs["segment_bed_pick_fraction"] = segment_bed_pick_fraction
         if "Elevation" in frame:
             ds.coords["elevation"] = frame.Elevation
 

@@ -169,6 +169,7 @@ def clear_store(session: icechunk.Session) -> None:
 def update_frame_index(
     session: icechunk.Session,
     frame_collections: dict[str, str] | None = None,
+    frame_scalar_attrs: dict[str, dict[str, float]] | None = None,
 ) -> None:
     """Rebuild frame_index (uint16 per trace) and frame_names root attribute from frame_id.
 
@@ -177,6 +178,11 @@ def update_frame_index(
     to ``frame_names``). The viewer uses this to show full collection names —
     parsing the year from the frame id alone is ambiguous when multiple
     collections share a year.
+
+    ``frame_scalar_attrs`` maps root-attribute names to per-frame value
+    mappings (frame_id -> value), each maintained as a list parallel to
+    ``frame_names`` (``None`` for frames with no recorded value). Used for
+    e.g. ``frame_bed_pick_fraction`` / ``segment_bed_pick_fraction``.
     """
     store = session.store
     root = zarr.open_group(store, mode="a")
@@ -211,6 +217,17 @@ def update_frame_index(
         if frame_collections:
             prev_mapping.update(frame_collections)
         root.attrs["frame_collections"] = [prev_mapping.get(name, "") for name in frame_names]
+
+    # Scalar per-frame attributes, same merge semantics as frame_collections.
+    # (The first to_zarr write copies the first frame's scalar attrs onto the
+    # root group; anything that isn't a list is that artifact, not our index.)
+    for attr_name, new_values in (frame_scalar_attrs or {}).items():
+        prev_raw = root.attrs.get(attr_name, [])
+        prev_vals = list(prev_raw) if isinstance(prev_raw, (list, tuple)) else []
+        prev_map = dict(zip(prev_names, prev_vals))
+        prev_map.update(new_values)
+        if prev_map:
+            root.attrs[attr_name] = [prev_map.get(name) for name in frame_names]
 
     logger.info("Updated frame_index: %d traces, %d unique frames", len(frame_ids), len(frame_names))
 

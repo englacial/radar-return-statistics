@@ -108,8 +108,12 @@ def test_process_frame_output_variables(mocker, synthetic_frame, synthetic_layer
         "surface_twtt", "bed_twtt", "surface_elevation", "bed_elevation",
         "surface_power_dB", "bed_power_dB", "required_surface_snr_dB",
         "pre_surface_noise_dB", "post_bed_noise_dB",
-        "qc_pass", "frame_id",
+        "record_tail_noise_dB",
+        "qc_pass", "qc_surface_pass", "qc_heading_pass", "qc_agl_pass",
+        "bed_pick_available", "bed_pick_attempted", "bed_pick_quality", "frame_id",
     }
+    assert ds.attrs["frame_bed_pick_fraction"] == 1.0
+    assert ds.attrs["segment_bed_pick_fraction"] == 1.0
 
 
 def test_process_frame_frame_id_filled(mocker, synthetic_frame, synthetic_layers, minimal_proc_config):
@@ -150,6 +154,153 @@ def test_process_frame_bed_fallback_key(mocker, synthetic_frame, synthetic_layer
     assert ds is not None
     for var in ("bed_twtt", "bed_power_dB", "required_surface_snr_dB"):
         np.testing.assert_array_equal(ds[var].values, expected[var].values)
+
+
+def test_process_frame_partial_bed_picks(mocker, synthetic_frame, synthetic_layers, minimal_proc_config):
+    """Traces missing bed picks keep surface metrics; bed metrics are NaN;
+    availability flag and fraction attrs reflect the gaps."""
+    import xarray as xr
+
+    layers = dict(synthetic_layers)
+    bed_twtt = synthetic_layers["standard:bottom"]["twtt"].values.copy()
+    bed_twtt[:4] = np.nan  # first 4 of 10 traces unpicked
+    layers["standard:bottom"] = {"twtt": xr.DataArray(
+        bed_twtt, dims=["slow_time"],
+        coords={"slow_time": synthetic_frame.slow_time.values},
+    )}
+    opr = mocker.MagicMock()
+    opr.load_frame.return_value = synthetic_frame
+    opr.get_layers.return_value = layers
+
+    ds = process_frame(opr, types.SimpleNamespace(name="FRAME"), minimal_proc_config)
+
+    assert ds is not None
+    assert list(ds["bed_pick_available"].values) == [False] * 4 + [True] * 6
+    assert np.isnan(ds["bed_twtt"].values[:4]).all()
+    assert np.isnan(ds["bed_power_dB"].values[:4]).all()
+    assert np.isfinite(ds["bed_twtt"].values[4:]).all()
+    # Surface metrics survive on the unpicked traces
+    assert np.isfinite(ds["surface_power_dB"].values).all()
+    assert ds.attrs["frame_bed_pick_fraction"] == pytest.approx(0.6)
+    assert ds.attrs["segment_bed_pick_fraction"] == pytest.approx(0.6)
+
+
+def test_process_frame_min_traces_uses_pick_independent_qc(
+    mocker, synthetic_frame, synthetic_layers, minimal_proc_config
+):
+    """A frame where most traces lack bed picks (failing the ice-thickness
+    check) survives as long as enough traces pass pick-independent QC."""
+    import xarray as xr
+
+    layers = dict(synthetic_layers)
+    bed_twtt = synthetic_layers["standard:bottom"]["twtt"].values.copy()
+    bed_twtt[:8] = np.nan  # only 2 of 10 traces picked
+    layers["standard:bottom"] = {"twtt": xr.DataArray(
+        bed_twtt, dims=["slow_time"],
+        coords={"slow_time": synthetic_frame.slow_time.values},
+    )}
+    config = dict(minimal_proc_config)
+    config["qc"] = {**minimal_proc_config["qc"],
+                    "min_ice_thickness_m": 100, "min_traces_after_qc": 5}
+
+    opr = mocker.MagicMock()
+    opr.load_frame.return_value = synthetic_frame
+    opr.get_layers.return_value = layers
+
+    ds = process_frame(opr, types.SimpleNamespace(name="FRAME"), config)
+
+    assert ds is not None, "frame should survive via pick-independent QC"
+    assert int(ds["qc_pass"].sum()) == 2          # full QC: only picked traces
+    assert int(ds["qc_surface_pass"].sum()) == 10  # no pick-independent checks enabled
+    # Unpicked traces failed full QC but keep surface metrics
+    assert np.isfinite(ds["surface_power_dB"].values).all()
+    assert np.isnan(ds["required_surface_snr_dB"].values[:8]).all()
+
+
+def test_process_frame_skips_segment_with_no_bed_picks(
+    mocker, synthetic_frame, synthetic_layers, minimal_proc_config
+):
+    """A bed layer containing zero finite picks = picking never attempted."""
+    import xarray as xr
+
+    layers = dict(synthetic_layers)
+    layers["standard:bottom"] = {"twtt": xr.DataArray(
+        np.full(len(synthetic_frame.slow_time), np.nan), dims=["slow_time"],
+        coords={"slow_time": synthetic_frame.slow_time.values},
+    )}
+    opr = mocker.MagicMock()
+    opr.load_frame.return_value = synthetic_frame
+    opr.get_layers.return_value = layers
+
+    assert process_frame(opr, types.SimpleNamespace(name="FRAME"), minimal_proc_config) is None
+
+
+def test_compute_record_tail_noise_matches_median(synthetic_frame):
+    from radar_return_statistics.processing import compute_record_tail_noise
+
+    result = compute_record_tail_noise(synthetic_frame, {"record_tail": {"duration_us": 5.0}})
+
+    twtt = synthetic_frame.twtt.values
+    data = np.abs(synthetic_frame.Data.values)  # (slow_time, twtt)
+    mask = twtt >= twtt[-1] - 5.0e-6
+    expected = 10.0 * np.log10(np.median(data[:, mask], axis=1))
+    np.testing.assert_allclose(result, expected)
+
+
+def test_bed_pick_attempted_excludes_segment_edges(
+    mocker, synthetic_frame, synthetic_layers, minimal_proc_config
+):
+    """Missing picks before the first / after the last segment pick don't count
+    as attempted; interior gaps do."""
+    import xarray as xr
+
+    layers = dict(synthetic_layers)
+    bed_twtt = synthetic_layers["standard:bottom"]["twtt"].values.copy()
+    bed_twtt[:3] = np.nan   # leading edge gap
+    bed_twtt[5] = np.nan    # interior gap (censored candidate)
+    bed_twtt[-2:] = np.nan  # trailing edge gap
+    layers["standard:bottom"] = {"twtt": xr.DataArray(
+        bed_twtt, dims=["slow_time"],
+        coords={"slow_time": synthetic_frame.slow_time.values},
+    )}
+    opr = mocker.MagicMock()
+    opr.load_frame.return_value = synthetic_frame
+    opr.get_layers.return_value = layers
+
+    ds = process_frame(opr, types.SimpleNamespace(name="FRAME"), minimal_proc_config)
+
+    attempted = ds["bed_pick_attempted"].values
+    available = ds["bed_pick_available"].values
+    assert list(attempted) == [False] * 3 + [True] * 5 + [False] * 2
+    censored = attempted & ~available
+    assert list(np.nonzero(censored)[0]) == [5]
+
+
+def test_process_frame_bed_pick_quality_passthrough(
+    mocker, synthetic_frame, synthetic_layers, minimal_proc_config
+):
+    import xarray as xr
+
+    layers = dict(synthetic_layers)
+    quality = np.full(len(synthetic_frame.slow_time), 2.0)
+    bed = dict(synthetic_layers["standard:bottom"])
+    bed["quality"] = xr.DataArray(
+        quality, dims=["slow_time"],
+        coords={"slow_time": synthetic_frame.slow_time.values},
+    )
+    layers["standard:bottom"] = bed
+    opr = mocker.MagicMock()
+    opr.load_frame.return_value = synthetic_frame
+    opr.get_layers.return_value = layers
+
+    ds = process_frame(opr, types.SimpleNamespace(name="FRAME"), minimal_proc_config)
+    assert (ds["bed_pick_quality"].values == 2).all()
+
+    # Without a quality field, the flag is -1 everywhere
+    opr.load_frame.return_value = synthetic_frame
+    opr.get_layers.return_value = synthetic_layers
+    ds2 = process_frame(opr, types.SimpleNamespace(name="FRAME"), minimal_proc_config)
+    assert (ds2["bed_pick_quality"].values == -1).all()
 
 
 def test_process_frame_returns_none_on_layer_exception(mocker, synthetic_frame, minimal_proc_config):

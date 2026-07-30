@@ -143,6 +143,28 @@ def test_update_frame_index_writes_collections(local_repo):
     assert dict(zip(names, cols)) == {"FRAME_A": "season_a", "FRAME_B": "season_b"}
 
 
+def test_update_frame_index_writes_scalar_attrs(local_repo):
+    s1 = local_repo.writable_session("main")
+    store_mod.write_frame_results(s1, "F1", _make_result_ds(n_traces=3, frame_id="FRAME_A", hour_offset=0))
+    store_mod.update_frame_index(
+        s1, frame_scalar_attrs={"frame_bed_pick_fraction": {"FRAME_A": 0.5}},
+    )
+    store_mod.commit_session(s1, "first")
+
+    # Second run adds a frame; prior frame's value must be preserved.
+    s2 = local_repo.writable_session("main")
+    store_mod.write_frame_results(s2, "F2", _make_result_ds(n_traces=4, frame_id="FRAME_B", hour_offset=1))
+    store_mod.update_frame_index(
+        s2, frame_scalar_attrs={"frame_bed_pick_fraction": {"FRAME_B": 1.0}},
+    )
+    store_mod.commit_session(s2, "second")
+
+    root = _read_root(local_repo)
+    names = list(root.attrs["frame_names"])
+    fracs = list(root.attrs["frame_bed_pick_fraction"])
+    assert dict(zip(names, fracs)) == {"FRAME_A": 0.5, "FRAME_B": 1.0}
+
+
 def test_update_frame_index_preserves_prior_collections(local_repo):
     """A subsequent run with only new-frame collections must not blank out prior frames."""
     s1 = local_repo.writable_session("main")
