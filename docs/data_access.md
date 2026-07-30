@@ -1,38 +1,32 @@
 # Accessing the Data
 
 The processed radar return statistics are stored in an [icechunk](https://icechunk.io/)
-versioned store backed by S3. The data is stored as zarr v3 arrays and can be accessed
+versioned store backed by AWS S3. The data is stored as zarr v3 arrays and can be accessed
 from Python, JavaScript, or any zarr-compatible tool.
 
 ## Store location
 
-| Store | S3 URL | Region |
-|-------|--------|--------|
-| ASE (Amundsen Sea Embayment) | `s3://opr-radar-metrics/icechunk/ase` | G-H subregion |
+| Store | S3 prefix | Coverage |
+|-------|-----------|----------|
+| Antarctica | `s3://opr-radar-metrics/icechunk/antarctica` | Full continent, all usable airborne seasons, 10s decimation |
+| Greenland | `s3://opr-radar-metrics/icechunk/greenland` | Full Greenland, 2013–2019 P3 seasons, 10s decimation |
+| ASE (Amundsen Sea Embayment) | `s3://opr-radar-metrics/icechunk/ase` | G-H subregion, DC8 seasons |
+| UTIG | `s3://opr-radar-metrics/icechunk/utig` | BaslerJKB seasons, 5s decimation |
+| Cross-system | `s3://opr-radar-metrics/icechunk/crosssystem` | David/Drygalski/Moscow region, all systems |
 
-HTTP access: `https://opr-radar-metrics.s3.us-west-2.amazonaws.com/icechunk/ase/`
+HTTP access (public read, no credentials needed):
+`https://opr-radar-metrics.s3.us-west-2.amazonaws.com/icechunk/<name>/`
 
 ## Variables
 
-All variables share a single `slow_time` dimension (one entry per decimated trace).
+All per-trace variables share a single `slow_time` dimension (one entry per
+decimated trace). See the **Output metrics** section of
+[architecture.md](architecture.md) for the full list of variables, their
+definitions, the QC masking semantics, and how missing bed picks are
+represented for downstream missingness analyses.
 
-| Variable | Description | Units |
-|----------|-------------|-------|
-| `latitude` | Trace latitude | degrees |
-| `longitude` | Trace longitude | degrees |
-| `elevation` | Aircraft WGS84 elevation | m |
-| `surface_twtt` | Surface two-way travel time (peak within margin) | s |
-| `bed_twtt` | Bed two-way travel time (peak within margin) | s |
-| `surface_elevation` | Surface WGS84 elevation from layer picks | m |
-| `bed_elevation` | Bed WGS84 elevation from layer picks | m |
-| `surface_power_dB` | Surface peak return power | dB |
-| `bed_power_dB` | Bed peak return power | dB |
-| `required_surface_snr_dB` | Geometric-spreading-corrected surface-to-bed power ratio | dB |
-| `qc_pass` | Whether the trace passed QC checks | bool (0/1) |
-| `frame_id` | Source frame identifier | string |
-| `slow_time` | CF-encoded timestamp | seconds since 1970-01-01 |
-
-The `processed_frames` array tracks which frame IDs have been ingested.
+The `processed_frames` array tracks which frame IDs have been ingested, and
+`frame_index` maps each trace to the `frame_names` root attribute.
 
 ## Python access
 
@@ -47,7 +41,7 @@ storage = icechunk.s3_storage(
     bucket="opr-radar-metrics",
     prefix="icechunk/ase",
     region="us-west-2",
-    from_env=True,  # uses AWS credential chain
+    anonymous=True,  # public read; use from_env=True for the AWS credential chain
 )
 repo = icechunk.Repository.open(storage=storage)
 session = repo.readonly_session(branch="main")
@@ -141,7 +135,7 @@ The `web/` directory contains a full interactive map viewer built with this appr
 Generate maps for all variables:
 
 ```bash
-uv run python -m radar_return_statistics.visualize_map config/config.yaml --output-dir outputs/maps
+uv run python -m radar_return_statistics.visualize_map config/config_antarctica.yaml --output-dir outputs/maps
 ```
 
 ### Per-frame profiles
@@ -149,7 +143,7 @@ uv run python -m radar_return_statistics.visualize_map config/config.yaml --outp
 Generate elevation and return power profiles for a single frame:
 
 ```bash
-uv run python -m radar_return_statistics.visualize_frame config/config.yaml Data_20181022_01_010
+uv run python -m radar_return_statistics.visualize_frame config/config_antarctica.yaml Data_20181022_01_010
 ```
 
 ### Interactive web viewer

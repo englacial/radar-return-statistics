@@ -4,7 +4,11 @@ The `web/` directory contains a browser-based map viewer built with Vite + TypeS
 
 ## Configuration
 
-Edit `web/src/config.ts` to change the store URL or add/remove display variables. The `STORE_URL` must point to an icechunk store accessible via HTTP range requests (e.g., an S3 bucket with CORS enabled).
+Edit `web/src/config.ts` to add/remove stores (the `STORES` list — Antarctica,
+ASE, UTIG, and Greenland today) or display variables. Each store URL must point
+to an icechunk store accessible via HTTP range requests (e.g., an S3 bucket
+with CORS enabled and public read). The viewer includes a store switcher, and
+uses the `frame_collections` root attribute to label seasons.
 
 ## Development
 

@@ -21,13 +21,52 @@ Per-trace (resampled) values stored with `slow_time` dimension:
   `[bed + post_bed.start_offset_us, twtt[-1] - post_bed.end_offset_us]`.
   Both noise variables are configured by `processing.noise` (defaults: pre 1/1 us,
   post 5/5 us). NaN if the requested window is empty for that trace.
+* `record_tail_noise_dB` - median power (dB) in the final `record_tail.duration_us`
+  (default 5 us) of the record. Pick-independent noise-floor estimate; an upper
+  bound where deep returns reach the record end.
+* `bed_pick_available` - bed pick aligned to this trace (pre-QC)
+* `bed_pick_attempted` - trace lies within the segment's picked span (between the
+  segment's first and last finite bed pick); leading/trailing gaps are excluded
+  from missingness analyses as segment-edge quirks
+* `bed_pick_quality` - OPR layer quality flag (1 good / 2 moderate / 3 derived),
+  -1 where no pick or flag unavailable
+* `qc_pass` / `qc_surface_pass` / `qc_heading_pass` / `qc_agl_pass` - full QC AND,
+  pick-independent AND, and individual pick-independent check flags. Surface-side
+  metrics are masked by `qc_surface_pass`; bed-side metrics by `qc_pass`.
 * `frame_id` - source frame identifier
 
 Coordinates: `latitude`, `longitude`, `elevation`
 
+Root attributes `frame_names`, `frame_collections`, `frame_bed_pick_fraction`,
+and `segment_bed_pick_fraction` are parallel lists (one entry per unique frame)
+giving each frame's season and bed-picking effort per frame / per segment. The
+per-trace `frame_index` array indexes into them.
+
+### Missing bed picks as censored observations
+
+Traces where picking was attempted but no bed was found (usually low bed SNR)
+can be identified as:
+
+```python
+censored = qc_surface & attempted & ~available
+```
+
+where those arrays come from `qc_surface_pass`, `bed_pick_attempted`, and
+`bed_pick_available`. These traces retain surface power and noise-floor
+estimates (`record_tail_noise_dB`), so they can enter analyses as
+right-censored required-surface-SNR observations rather than silently missing
+data. Gate on `frame_bed_pick_fraction` / `segment_bed_pick_fraction` to set
+the required picking-effort level. Segments with no bed layer at all (picking
+never attempted) are excluded from the store entirely, so they cannot
+contaminate missingness estimates.
+
+Stores written before 2026-07-29 predate the `record_tail_noise_dB` /
+`bed_pick_*` / `qc_*_pass` columns and the split masking semantics; there,
+`qc_pass == False` implies all metrics NaN.
+
 ## Architecture
 
-A **plain Python runner** (no snakemake) flat-maps over independent frames. Icechunk
+A Python runner flat-maps over independent frames. Icechunk
 handles versioning and incremental tracking (processed frame IDs stored in the zarr group).
 
 ### Modules
@@ -41,10 +80,14 @@ handles versioning and incremental tracking (processed frame IDs stored in the z
 ### How to run
 
 ```bash
-uv run python -m radar_return_statistics config/config.yaml
-uv run python -m radar_return_statistics config/config.yaml --reprocess  # ignore existing frames
-uv run python -m radar_return_statistics config/config.yaml -v           # debug logging
+uv run python -m radar_return_statistics config/config_antarctica.yaml
+uv run python -m radar_return_statistics config/config_antarctica.yaml --reprocess  # ignore existing frames
+uv run python -m radar_return_statistics config/config_antarctica.yaml -v           # debug logging
 ```
+
+Production configs: `config_greenland.yaml`, `config_antarctica.yaml`,
+`config_ase.yaml`, `config_utig.yaml`, `config_crosssystem.yaml`;
+`test_config.yaml` is a small local-store test run.
 
 ### Storage
 
@@ -57,26 +100,24 @@ Set `AWS_PROFILE` for local development.
 1. Load config, open/create icechunk repo
 2. Query frames from OPR matching region geometry
 3. Filter to unprocessed frames (or all if `--reprocess`)
-4. Process frames in parallel (`ProcessPoolExecutor`)
+4. Process frames in parallel (`ProcessPoolExecutor`, spawn context)
 5. Write results sequentially to icechunk (append along `slow_time`)
-6. Commit with summary message
-
-# Features to implement later:
+6. Commit with summary message; `processing.checkpoint_every: N` additionally
+   commits every N frames so long runs are resumable
 
 ### Testing
 
-The persistent icechunk store should allow for automated test to be setup where individual
-frames are run and the output is compared against the current stored output. The test should
-pass if the outputs are the same.
+`tests/unit` covers processing, config, and store logic against synthetic
+frames. `tests/integration` (pytest marker `integration`, requires network)
+runs the full pipeline against a local store and includes a regression test
+(`test_regression.py`) that re-processes a known frame and compares it against
+the public crosssystem S3 store — any mismatch means the algorithm changed
+since that store was built.
 
 ### Access and visualization
 
-A small set of utilities should be provided for easily accessing and opening the output
-stored in icechunk. These utility functions should include basic visualization, including
-building a map of each of the metrics.
-
-### GitHub pages visualization
-
-An HTML representaiton of the icechunk dataset should be created that uses icechunk-js
-(https://github.com/englacial/icechunk-js/) to stream the outputs for each metric
-onto a map in the user's browser.
+See `docs/data_access.md` for reading the stores from Python/JavaScript.
+`visualize_map` renders static per-variable maps; `visualize_frame` renders
+per-frame profiles. The `web/` directory contains the browser viewer
+(icechunk-js + Leaflet, see `docs/viewer.md`), deployed to GitHub Pages by
+`.github/workflows/deploy-pages.yml`.
