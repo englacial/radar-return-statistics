@@ -6,12 +6,40 @@ export interface StoreData {
   latitude: Float64Array;
   longitude: Float64Array;
   qcPass: Int8Array | null;
+  // Pick-independent QC AND (masks surface-side metrics). Null on stores that
+  // predate the split-QC schema (2026-07); fall back to qcPass.
+  qcSurfacePass: Int8Array | null;
+  // Bed-pick availability flags (null on older stores). Censored traces =
+  // qcSurfacePass & bedPickAttempted & !bedPickAvailable.
+  bedPickAvailable: Int8Array | null;
+  bedPickAttempted: Int8Array | null;
   frameId: string[] | null;
   // Collection name (e.g. "2018_Greenland_P3") per trace, parallel to frameId.
   // Null when the store predates frame_collections backfill.
   frameCollection: string[] | null;
   variables: Record<string, Float64Array>;
   numTraces: number;
+}
+
+// QC mask for surface-side variables: pick-independent where available,
+// falling back to the full mask on older stores.
+export function surfaceQcMask(data: StoreData): Int8Array | null {
+  return data.qcSurfacePass ?? data.qcPass;
+}
+
+// Store carries the flags needed to identify censored (no-bed-detected) traces.
+export function hasCensoredInfo(data: StoreData): boolean {
+  return !!(data.qcSurfacePass && data.bedPickAvailable && data.bedPickAttempted);
+}
+
+// Bed picking was attempted here, the trace passes pick-independent QC, but no
+// bed was found — usually because bed SNR was too low.
+export function isCensored(data: StoreData, i: number): boolean {
+  return (
+    !!data.qcSurfacePass?.[i] &&
+    !!data.bedPickAttempted?.[i] &&
+    data.bedPickAvailable?.[i] === 0
+  );
 }
 
 export async function openStore(storeUrl: string, snapshotId?: string): Promise<IcechunkStore> {
@@ -82,13 +110,21 @@ export async function loadEssentials(store: IcechunkStore): Promise<StoreData> {
   const latitude = toFloat64Array(latChunk);
   const longitude = toFloat64Array(lonChunk);
 
-  let qcPass: Int8Array | null = null;
-  try {
-    const qcChunk = await loadArray(store, "qc_pass");
-    qcPass = toInt8Array(qcChunk);
-  } catch {
-    // qc_pass may not exist
-  }
+  // Optional flag arrays — absent on stores predating the relevant schema.
+  const loadFlag = async (name: string): Promise<Int8Array | null> => {
+    try {
+      return toInt8Array(await loadArray(store, name));
+    } catch {
+      return null;
+    }
+  };
+  const [qcPass, qcSurfacePass, bedPickAvailable, bedPickAttempted] =
+    await Promise.all([
+      loadFlag("qc_pass"),
+      loadFlag("qc_surface_pass"),
+      loadFlag("bed_pick_available"),
+      loadFlag("bed_pick_attempted"),
+    ]);
 
   let frameId: string[] | null = null;
   let frameCollection: string[] | null = null;
@@ -102,6 +138,9 @@ export async function loadEssentials(store: IcechunkStore): Promise<StoreData> {
     latitude,
     longitude,
     qcPass,
+    qcSurfacePass,
+    bedPickAvailable,
+    bedPickAttempted,
     frameId,
     frameCollection,
     variables: {},

@@ -237,6 +237,27 @@
         cursor: pointer;
       }
 
+      #legend-censored {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        margin-top: 6px;
+        font-size: 11px;
+        color: #ccc;
+      }
+
+      #legend-censored[hidden] {
+        display: none;
+      }
+
+      #legend-censored .censored-swatch {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        border: 1.2px solid #b0b0b0;
+        flex-shrink: 0;
+      }
+
       .leaflet-container {
         background: #1a1a2e;
       }
@@ -374,6 +395,7 @@
           <option value="bed_power_dB">Bed Power [dB]</option>
           <option value="pre_surface_noise_dB">Pre-Surface Noise [dB]</option>
           <option value="post_bed_noise_dB">Post-Bed Noise [dB]</option>
+          <option value="record_tail_noise_dB">Record Tail Noise [dB]</option>
           <option value="surface_twtt">Surface TWTT [µs]</option>
           <option value="bed_twtt">Bed TWTT [µs]</option>
         </select>
@@ -444,6 +466,10 @@
             <span id="legend-mid"></span>
             <span id="legend-min"></span>
           </div>
+        </div>
+        <div id="legend-censored" hidden>
+          <span class="censored-swatch"></span>
+          <span>No bed detected</span>
         </div>
         <label class="legend-adaptive">
           <input type="checkbox" id="legend-adaptive-cb">

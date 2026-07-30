@@ -1,5 +1,5 @@
 import { IcechunkStore } from "@carbonplan/icechunk-js";
-import { VARIABLES, STORES } from "./config";
+import { VARIABLES, STORES, BED_SIDE_VARIABLES } from "./config";
 import { createColorScale, drawLegend } from "./colormap";
 import { getCommitLog, CommitEntry, formatDate } from "./history";
 import {
@@ -28,7 +28,15 @@ import {
   seasonColors,
   HistSeries,
 } from "./histogram";
-import { openStore, loadEssentials, loadVariables, StoreData } from "./store";
+import {
+  openStore,
+  loadEssentials,
+  loadVariables,
+  StoreData,
+  surfaceQcMask,
+  hasCensoredInfo,
+  isCensored,
+} from "./store";
 
 const datasetSelect = document.getElementById(
   "dataset-select"
@@ -52,6 +60,7 @@ const legendMid = document.getElementById("legend-mid") as HTMLSpanElement;
 const legendMin = document.getElementById("legend-min") as HTMLSpanElement;
 const legendCanvas = document.getElementById("legend-bar") as HTMLCanvasElement;
 const legendAdaptiveCb = document.getElementById("legend-adaptive-cb") as HTMLInputElement;
+const legendCensored = document.getElementById("legend-censored") as HTMLDivElement;
 const showCheckpointsCb = document.getElementById("show-checkpoints-cb") as HTMLInputElement;
 const velocityLegend = document.getElementById("velocity-legend") as HTMLDivElement;
 const velocityLegendTitle = document.getElementById("velocity-legend-title") as HTMLDivElement;
@@ -141,7 +150,11 @@ function hideLoading() {
   loadingOverlay.classList.add("hidden");
 }
 
-function updateLegend(variableName: string, scale: ReturnType<typeof createColorScale>) {
+function updateLegend(
+  variableName: string,
+  scale: ReturnType<typeof createColorScale>,
+  showCensored = false,
+) {
   const varInfo = VARIABLES[variableName];
   if (!varInfo) return;
   legendTitle.textContent = `${varInfo.label} [${varInfo.unit}]`;
@@ -149,6 +162,7 @@ function updateLegend(variableName: string, scale: ReturnType<typeof createColor
   legendMid.textContent = formatScaledValue((scale.vmin + scale.vmax) / 2, varInfo);
   legendMin.textContent = formatScaledValue(scale.vmin, varInfo);
   drawLegend(legendCanvas, scale, varInfo.cmap);
+  legendCensored.hidden = !showCensored;
 }
 
 function drawVelocityLegend() {
@@ -182,7 +196,9 @@ function updateRegionHistogram(): void {
   if (!varInfo || !values) return;
   const scale = varInfo.displayScale ?? 1;
   const seasons = currentData.frameCollection;
-  const qc = currentData.qcPass;
+  const qc = BED_SIDE_VARIABLES.has(variableName)
+    ? currentData.qcPass
+    : surfaceQcMask(currentData);
 
   const groups = new Map<string, number[]>();
   const all: number[] = [];
@@ -256,6 +272,13 @@ function renderCurrentVariable() {
     return;
   }
 
+  // Bed-side variables are NaN wherever no bed was found; those traces are
+  // drawn as hollow gray "no bed detected" markers when the store carries the
+  // bed-pick flags. Surface-side variables use the pick-independent QC mask.
+  const bedSide = BED_SIDE_VARIABLES.has(variableName);
+  const showCensored = bedSide && hasCensoredInfo(currentData);
+  const scaleQcMask = bedSide ? currentData.qcPass : surfaceQcMask(currentData);
+
   const seasonPred = seasonPredicate();
   // Adaptive scale: stretch color range to values currently visible on the map
   // (also respecting any season filter so they agree with what's drawn).
@@ -267,14 +290,21 @@ function renderCurrentVariable() {
       }
     : undefined;
 
-  const scale = createColorScale(values, varInfo.cmap, currentData.qcPass, scaleIncludeFn);
-  renderPoints(currentData, variableName, varInfo, scale, seasonPred);
-  updateLegend(variableName, scale);
+  const scale = createColorScale(values, varInfo.cmap, scaleQcMask, scaleIncludeFn);
+  renderPoints(currentData, variableName, varInfo, scale, seasonPred, showCensored);
+  updateLegend(variableName, scale, showCensored);
 
   const validCount = Array.from(values).filter((v) => !isNaN(v)).length;
-  setStatus(
-    `${currentData.numTraces.toLocaleString()} traces, ${validCount.toLocaleString()} valid`
-  );
+  let status = `${currentData.numTraces.toLocaleString()} traces, ${validCount.toLocaleString()} valid`;
+  if (showCensored) {
+    let censoredCount = 0;
+    for (let i = 0; i < currentData.numTraces; i++) {
+      if (seasonPred && !seasonPred(i)) continue;
+      if (isCensored(currentData, i)) censoredCount++;
+    }
+    status += `, ${censoredCount.toLocaleString()} no bed detected`;
+  }
+  setStatus(status);
 }
 
 async function ensureVariable(variableName: string): Promise<void> {

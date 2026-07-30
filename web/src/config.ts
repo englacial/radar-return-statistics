@@ -36,6 +36,20 @@ export const VARIABLE_SOURCE: Record<string, string> = {
   rssnr: "required_surface_snr_dB",
 };
 
+// Bed-side variables are NaN wherever the bed pick is missing or the trace
+// failed a pick-dependent QC check. For these, traces where picking was
+// attempted but no bed was found (low SNR "censored" observations:
+// qc_surface_pass & bed_pick_attempted & !bed_pick_available) are drawn as
+// hollow gray markers. Surface-side variables use the pick-independent QC
+// mask (qc_surface_pass) where the store provides it.
+export const BED_SIDE_VARIABLES = new Set([
+  "rssnr",
+  "bed_elevation",
+  "bed_power_dB",
+  "bed_twtt",
+  "post_bed_noise_dB",
+]);
+
 export interface VariableInfo {
   label: string;
   cmap: string;
@@ -78,6 +92,11 @@ export const VARIABLES: Record<string, VariableInfo> = {
   },
   post_bed_noise_dB: {
     label: "Post-Bed Noise",
+    cmap: "turbo",
+    unit: "dB",
+  },
+  record_tail_noise_dB: {
+    label: "Record Tail Noise",
     cmap: "turbo",
     unit: "dB",
   },

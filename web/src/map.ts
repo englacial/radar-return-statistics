@@ -7,8 +7,12 @@ import GeoRasterLayer, {
   type GeoRaster as LayerGeoRaster,
 } from "georaster-layer-for-leaflet";
 import { ColorScale } from "./colormap";
-import { StoreData } from "./store";
+import { StoreData, surfaceQcMask, isCensored } from "./store";
 import { Hemisphere, VariableInfo } from "./config";
+
+// Hollow gray marker for traces where bed picking was attempted but no bed
+// was detected (censored observations). Matches the legend swatch.
+export const CENSORED_COLOR = "#b0b0b0";
 
 interface HemisphereConfig {
   epsg: string;
@@ -146,6 +150,8 @@ let renderedPoints: Array<{ lat: number; lon: number; idx: number }> = [];
 let currentFrameIds: string[] | null = null;
 let currentValues: Float64Array | null = null;
 let currentVarInfo: VariableInfo | null = null;
+// Rendered trace indices drawn as censored (no bed detected) markers.
+let currentCensoredIdxs: Set<number> = new Set();
 let tooltipEl: HTMLDivElement | null = null;
 const HOVER_THRESHOLD_PX = 12;
 
@@ -362,7 +368,11 @@ export function initMap(containerId: string, hemisphere: Hemisphere): L.Map {
       const line1 = document.createElement("div");
       line1.textContent = frameLabel;
       tooltip.appendChild(line1);
-      if (currentValues && currentVarInfo) {
+      if (currentCensoredIdxs.has(nearestPt.idx)) {
+        const line2 = document.createElement("div");
+        line2.textContent = "No bed detected (pick attempted)";
+        tooltip.appendChild(line2);
+      } else if (currentValues && currentVarInfo) {
         const v = currentValues[nearestPt.idx];
         if (!isNaN(v)) {
           const line2 = document.createElement("div");
@@ -414,6 +424,7 @@ export function destroyMap(): void {
   currentFrameIds = null;
   currentValues = null;
   currentVarInfo = null;
+  currentCensoredIdxs = new Set();
   if (tooltipEl && tooltipEl.parentNode) {
     tooltipEl.parentNode.removeChild(tooltipEl);
     tooltipEl = null;
@@ -508,6 +519,8 @@ interface PointData {
   lon: number;
   color: string;
   idx: number;
+  // Drawn as a hollow marker (no bed detected) instead of a filled dot.
+  censored?: boolean;
 }
 
 // Custom canvas layer that draws all points in one pass
@@ -563,10 +576,16 @@ const CanvasPointsLayer = L.Layer.extend({
 
     for (const pt of this._points) {
       const px = map.latLngToContainerPoint([pt.lat, pt.lon]);
-      ctx.fillStyle = pt.color;
       ctx.beginPath();
       ctx.arc(px.x, px.y, radius, 0, Math.PI * 2);
-      ctx.fill();
+      if (pt.censored) {
+        ctx.strokeStyle = pt.color;
+        ctx.lineWidth = 1.2;
+        ctx.stroke();
+      } else {
+        ctx.fillStyle = pt.color;
+        ctx.fill();
+      }
     }
   },
 });
@@ -577,6 +596,7 @@ export function renderPoints(
   varInfo: VariableInfo,
   scale: ColorScale,
   seasonPredicate: ((traceIdx: number) => boolean) | null = null,
+  showCensored = false,
 ): void {
   if (canvasOverlay) {
     map.removeLayer(canvasOverlay);
@@ -588,10 +608,13 @@ export function renderPoints(
 
   // Stable subsample over qc-passing traces with valid lat/lon — *not* filtered
   // by variable-NaN or season. Sampling the same set every render keeps the
-  // unrelated seasons' visible points fixed when one is toggled.
+  // unrelated seasons' visible points fixed when one is toggled. Uses the
+  // pick-independent mask where available so censored (no-bed) traces stay in
+  // the sample; older stores fall back to the full qc_pass mask.
+  const qcMask = surfaceQcMask(data);
   const baseIndices: number[] = [];
   for (let i = 0; i < data.numTraces; i++) {
-    if (data.qcPass && !data.qcPass[i]) continue;
+    if (qcMask && !qcMask[i]) continue;
     if (isNaN(data.latitude[i]) || isNaN(data.longitude[i])) continue;
     baseIndices.push(i);
   }
@@ -605,17 +628,31 @@ export function renderPoints(
     }
   }
 
-  const points: PointData[] = [];
+  // Censored markers first so colored data draws on top of them.
+  const censoredPoints: PointData[] = [];
+  const coloredPoints: PointData[] = [];
+  currentCensoredIdxs = new Set();
   for (const i of indices) {
-    if (isNaN(values[i])) continue;
     if (seasonPredicate && !seasonPredicate(i)) continue;
-    points.push({
-      lat: data.latitude[i],
-      lon: data.longitude[i],
-      color: scale.getColor(values[i]),
-      idx: i,
-    });
+    if (!isNaN(values[i])) {
+      coloredPoints.push({
+        lat: data.latitude[i],
+        lon: data.longitude[i],
+        color: scale.getColor(values[i]),
+        idx: i,
+      });
+    } else if (showCensored && isCensored(data, i)) {
+      censoredPoints.push({
+        lat: data.latitude[i],
+        lon: data.longitude[i],
+        color: CENSORED_COLOR,
+        idx: i,
+        censored: true,
+      });
+      currentCensoredIdxs.add(i);
+    }
   }
+  const points = censoredPoints.concat(coloredPoints);
 
   // Update hover state
   renderedPoints = points.map((p) => ({ lat: p.lat, lon: p.lon, idx: p.idx }));
@@ -631,13 +668,14 @@ export function renderPoints(
 }
 
 export function fitToData(data: StoreData): void {
+  const qcMask = surfaceQcMask(data);
   let minLat = Infinity,
     maxLat = -Infinity,
     minLon = Infinity,
     maxLon = -Infinity;
   for (let i = 0; i < data.numTraces; i++) {
     if (isNaN(data.latitude[i]) || isNaN(data.longitude[i])) continue;
-    if (data.qcPass && !data.qcPass[i]) continue;
+    if (qcMask && !qcMask[i]) continue;
     minLat = Math.min(minLat, data.latitude[i]);
     maxLat = Math.max(maxLat, data.latitude[i]);
     minLon = Math.min(minLon, data.longitude[i]);
