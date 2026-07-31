@@ -21,15 +21,27 @@ Per-trace (resampled) values stored with `slow_time` dimension:
   `[bed + post_bed.start_offset_us, twtt[-1] - post_bed.end_offset_us]`.
   Both noise variables are configured by `processing.noise` (defaults: pre 1/1 us,
   post 5/5 us). NaN if the requested window is empty for that trace.
-* `record_tail_noise_dB` - median power (dB) in the final `record_tail.duration_us`
-  (default 5 us) of the record. Pick-independent noise-floor estimate; an upper
-  bound where deep returns reach the record end.
+* `record_tail_noise_dB` - median power (dB) in the window
+  `[end - record_tail.start_offset_us, end - record_tail.end_offset_us]`
+  (defaults 12/7 us) near the record end. The end gap blanks the
+  post-processing rolloff seen in the final ~2-8 us of many seasons.
+  Pick-independent noise-floor estimate; an upper bound where deep returns
+  reach the window.
+* `post_bed_noise_interp_dB` / `post_bed_peak_interp_dB` / `post_bed_std_interp_dB` -
+  median / peak / std of power (dB) in the post-bed window anchored at the bed
+  pick where present (median then identical to `post_bed_noise_dB`), else at a
+  bed twtt linearly interpolated between the segment's adjacent picks. Defined
+  on censored traces inside the picked span; NaN outside it. A peak well above
+  the median flags bed-like energy below the interpolated bed that went unpicked.
 * `bed_pick_available` - bed pick aligned to this trace (pre-QC)
 * `bed_pick_attempted` - trace lies within the segment's picked span (between the
   segment's first and last finite bed pick); leading/trailing gaps are excluded
   from missingness analyses as segment-edge quirks
 * `bed_pick_quality` - OPR layer quality flag (1 good / 2 moderate / 3 derived),
   -1 where no pick or flag unavailable
+* `record_end_twtt` - twtt (s) of the last sample in the record; lets users
+  reconstruct the record-end-relative windows (post-bed, record tail). Never
+  QC-masked.
 * `qc_pass` / `qc_surface_pass` / `qc_heading_pass` / `qc_agl_pass` - full QC AND,
   pick-independent AND, and individual pick-independent check flags. Surface-side
   metrics are masked by `qc_surface_pass`; bed-side metrics by `qc_pass`.

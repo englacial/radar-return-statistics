@@ -44,6 +44,11 @@ processing:
     post_bed:
       start_offset_us: 5.0
       end_offset_us: 5.0
+    # Window measured back from the record end; the 7 us end gap blanks the
+    # post-processing rolloff (see claude_notes/tail_window_sensitivity_results.md)
+    record_tail:
+      start_offset_us: 12.0
+      end_offset_us: 7.0
 
 qc:
   max_heading_change_deg_per_km: 2.0

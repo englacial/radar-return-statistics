@@ -109,6 +109,8 @@ def test_process_frame_output_variables(mocker, synthetic_frame, synthetic_layer
         "surface_power_dB", "bed_power_dB", "required_surface_snr_dB",
         "pre_surface_noise_dB", "post_bed_noise_dB",
         "record_tail_noise_dB",
+        "post_bed_noise_interp_dB", "post_bed_peak_interp_dB", "post_bed_std_interp_dB",
+        "record_end_twtt",
         "qc_pass", "qc_surface_pass", "qc_heading_pass", "qc_agl_pass",
         "bed_pick_available", "bed_pick_attempted", "bed_pick_quality", "frame_id",
     }
@@ -235,16 +237,117 @@ def test_process_frame_skips_segment_with_no_bed_picks(
     assert process_frame(opr, types.SimpleNamespace(name="FRAME"), minimal_proc_config) is None
 
 
+def test_interp_post_bed_noise_identical_where_picked(
+    mocker, synthetic_frame, synthetic_layers, minimal_proc_config
+):
+    """With full picks, the interp-anchored median equals post_bed_noise_dB."""
+    opr = mocker.MagicMock()
+    opr.load_frame.return_value = synthetic_frame
+    opr.get_layers.return_value = synthetic_layers
+    # Default 5/5 us offsets leave no room after the fixture's bed (14.4 of
+    # 20 us) — use a window that actually exists.
+    config = dict(minimal_proc_config)
+    config["processing"] = {**minimal_proc_config["processing"],
+                            "noise": {"post_bed": {"start_offset_us": 1.0, "end_offset_us": 0.5}}}
+
+    ds = process_frame(opr, types.SimpleNamespace(name="FRAME"), config)
+
+    np.testing.assert_allclose(
+        ds["post_bed_noise_interp_dB"].values, ds["post_bed_noise_dB"].values,
+        rtol=1e-9, equal_nan=True,
+    )
+    assert np.isfinite(ds["post_bed_peak_interp_dB"].values).all()
+    assert (ds["post_bed_peak_interp_dB"].values >= ds["post_bed_noise_interp_dB"].values).all()
+    assert (ds["post_bed_std_interp_dB"].values >= 0).all()
+
+
+def test_interp_post_bed_metrics_on_gap_traces(
+    mocker, synthetic_frame, synthetic_layers, minimal_proc_config
+):
+    """Interior gaps get interp-anchored metrics; edge gaps stay NaN."""
+    import xarray as xr
+
+    layers = dict(synthetic_layers)
+    bed_twtt = synthetic_layers["standard:bottom"]["twtt"].values.copy()
+    bed_twtt[:2] = np.nan   # leading edge gap -> NaN metrics
+    bed_twtt[5] = np.nan    # interior gap -> interp-anchored metrics
+    layers["standard:bottom"] = {"twtt": xr.DataArray(
+        bed_twtt, dims=["slow_time"],
+        coords={"slow_time": synthetic_frame.slow_time.values},
+    )}
+    opr = mocker.MagicMock()
+    opr.load_frame.return_value = synthetic_frame
+    opr.get_layers.return_value = layers
+    config = dict(minimal_proc_config)
+    config["processing"] = {**minimal_proc_config["processing"],
+                            "noise": {"post_bed": {"start_offset_us": 1.0, "end_offset_us": 0.5}}}
+
+    ds = process_frame(opr, types.SimpleNamespace(name="FRAME"), config)
+
+    noise = ds["post_bed_noise_interp_dB"].values
+    assert np.isnan(noise[:2]).all(), "edge gaps must stay NaN (no extrapolation)"
+    assert np.isfinite(noise[5]), "interior gap gets interp-anchored metrics"
+    # Flat picks in the fixture -> interpolated anchor equals the pick value.
+    # Recompute the expected median for trace 5 directly from its samples.
+    twtt = synthetic_frame.twtt.values
+    pick = synthetic_layers["standard:bottom"]["twtt"].values[0]
+    mask = (twtt >= pick + 1.0e-6) & (twtt <= twtt[-1] - 0.5e-6)
+    expected = 10 * np.log10(np.median(np.abs(synthetic_frame.Data.values[5, mask])))
+    np.testing.assert_allclose(noise[5], expected, rtol=1e-9)
+    # Picked traces still identical to the standard term
+    picked = np.isfinite(ds["post_bed_noise_dB"].values)
+    np.testing.assert_allclose(
+        noise[picked], ds["post_bed_noise_dB"].values[picked], rtol=1e-9
+    )
+
+
+def test_record_end_twtt_matches_axis(mocker, synthetic_frame, synthetic_layers, minimal_proc_config):
+    """record_end_twtt equals the last twtt sample on every trace, unmasked."""
+    opr = mocker.MagicMock()
+    opr.load_frame.return_value = synthetic_frame
+    opr.get_layers.return_value = synthetic_layers
+
+    ds = process_frame(opr, types.SimpleNamespace(name="FRAME"), minimal_proc_config)
+
+    expected = synthetic_frame.twtt.values[-1]
+    np.testing.assert_allclose(ds["record_end_twtt"].values, expected, rtol=1e-12)
+    assert np.isfinite(ds["record_end_twtt"].values).all()
+
+
 def test_compute_record_tail_noise_matches_median(synthetic_frame):
     from radar_return_statistics.processing import compute_record_tail_noise
 
-    result = compute_record_tail_noise(synthetic_frame, {"record_tail": {"duration_us": 5.0}})
+    result = compute_record_tail_noise(
+        synthetic_frame,
+        {"record_tail": {"start_offset_us": 5.0, "end_offset_us": 0.0}},
+    )
 
     twtt = synthetic_frame.twtt.values
     data = np.abs(synthetic_frame.Data.values)  # (slow_time, twtt)
     mask = twtt >= twtt[-1] - 5.0e-6
     expected = 10.0 * np.log10(np.median(data[:, mask], axis=1))
     np.testing.assert_allclose(result, expected)
+
+
+def test_compute_record_tail_noise_blanks_record_end(synthetic_frame):
+    """A nonzero end offset excludes the final samples (rolloff blanking)."""
+    from radar_return_statistics.processing import compute_record_tail_noise
+
+    # Corrupt the last 2 us with a strong rolloff (tiny values)
+    frame = synthetic_frame.copy(deep=True)
+    twtt = frame.twtt.values
+    tail = twtt > twtt[-1] - 2.0e-6
+    frame.Data.values[:, tail] = 1e-12
+
+    corrupted = compute_record_tail_noise(
+        frame, {"record_tail": {"start_offset_us": 5.0, "end_offset_us": 0.0}})
+    blanked = compute_record_tail_noise(
+        frame, {"record_tail": {"start_offset_us": 7.0, "end_offset_us": 2.0}})
+
+    mask = (twtt >= twtt[-1] - 7.0e-6) & (twtt <= twtt[-1] - 2.0e-6)
+    expected = 10.0 * np.log10(np.median(np.abs(frame.Data.values[:, mask]), axis=1))
+    np.testing.assert_allclose(blanked, expected)
+    assert (blanked > corrupted).all(), "blanked window must not see the rolloff"
 
 
 def test_bed_pick_attempted_excludes_segment_edges(
@@ -301,6 +404,27 @@ def test_process_frame_bed_pick_quality_passthrough(
     opr.get_layers.return_value = synthetic_layers
     ds2 = process_frame(opr, types.SimpleNamespace(name="FRAME"), minimal_proc_config)
     assert (ds2["bed_pick_quality"].values == -1).all()
+
+
+def test_process_frame_surface_fallback_key(mocker, synthetic_frame, synthetic_layers, minimal_proc_config):
+    """Surface picks under ':surface' (some Greenland P3 segments) are used when
+    'standard:surface' is absent, producing the same output."""
+    opr = mocker.MagicMock()
+    opr.load_frame.return_value = synthetic_frame
+    opr.get_layers.return_value = synthetic_layers
+
+    expected = process_frame(opr, types.SimpleNamespace(name="FRAME"), minimal_proc_config)
+
+    fallback_layers = dict(synthetic_layers)
+    fallback_layers[":surface"] = fallback_layers.pop("standard:surface")
+    opr.load_frame.return_value = synthetic_frame
+    opr.get_layers.return_value = fallback_layers
+
+    ds = process_frame(opr, types.SimpleNamespace(name="FRAME"), minimal_proc_config)
+
+    assert ds is not None
+    for var in ("surface_twtt", "surface_power_dB", "required_surface_snr_dB"):
+        np.testing.assert_array_equal(ds[var].values, expected[var].values)
 
 
 def test_process_frame_returns_none_on_layer_exception(mocker, synthetic_frame, minimal_proc_config):

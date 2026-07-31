@@ -12,9 +12,11 @@ logger = logging.getLogger(__name__)
 
 SURFACE_KEY = "standard:surface"
 BED_KEY = "standard:bottom"
-# Some seasons (e.g. 2019_Antarctica_GV) publish bed picks under an empty-prefix
-# layer group; fall back to it when the standard key is absent.
+# Some seasons/segments publish picks under an empty-prefix layer group
+# (e.g. 2019_Antarctica_GV bed picks, some Greenland P3 segments' surface
+# picks); fall back to those keys when the standard ones are absent.
 BED_FALLBACK_KEY = ":bottom"
+SURFACE_FALLBACK_KEY = ":surface"
 
 # QC checks that do not depend on layer picks. Traces passing these are usable
 # surface observations even when the bed pick is missing — the basis for
@@ -28,7 +30,13 @@ PICK_ALIGN_TOLERANCE_S = 1
 DEFAULT_NOISE_CONFIG = {
     "pre_surface": {"start_offset_us": 1.0, "end_offset_us": 1.0},
     "post_bed": {"start_offset_us": 5.0, "end_offset_us": 5.0},
-    "record_tail": {"duration_us": 5.0},
+    # Both offsets measured back from the record end: window =
+    # [end - start_offset_us, end - end_offset_us]. The end gap blanks the
+    # post-processing rolloff in the final microseconds of many seasons;
+    # sensitivity study (claude_notes/tail_window_sensitivity.py) found sharp
+    # rolloffs recovering by 6-8 us across systems, so 7 us clears them while
+    # staying near the record end.
+    "record_tail": {"start_offset_us": 12.0, "end_offset_us": 7.0},
 }
 
 
@@ -143,17 +151,19 @@ def _nan_peak_pair(radar_ds):
     return nan, nan.copy()
 
 
-def compute_record_tail_noise(frame, noise_config):
-    """Per-trace median power (dB) in the final ``record_tail.duration_us`` of
-    the record.
+def compute_interp_bed_window_metrics(frame, anchor_twtt, noise_config):
+    """Median / peak / std of power (dB) in the post-bed window anchored at
+    ``anchor_twtt`` (per-trace: the bed pick where present, else a bed twtt
+    interpolated between adjacent picks).
 
-    Pick-independent: defined whether or not a bed pick exists, giving every
-    trace a noise-floor estimate from below the ice. Where deep returns reach
-    the record end this is an upper bound on the true noise floor (which makes
-    censoring bounds derived from it conservative).
+    The window and the median definition match ``compute_noise_powers``'s
+    post-bed term exactly, so where the anchor is the actual pick the median is
+    identical to ``post_bed_noise_dB``. Peak is the max sample (dB); std is the
+    standard deviation of the dB-converted samples. NaN anchor -> NaN metrics.
     """
     cfg = _resolve_noise_config(noise_config)
-    duration = cfg["record_tail"]["duration_us"] * 1e-6
+    post_start = cfg["post_bed"]["start_offset_us"] * 1e-6
+    post_end = cfg["post_bed"]["end_offset_us"] * 1e-6
 
     twtt = frame.twtt.values
     data_lin = np.abs(frame.Data.values)
@@ -161,7 +171,58 @@ def compute_record_tail_noise(frame, noise_config):
         data_lin = data_lin.T
 
     n_traces = data_lin.shape[1]
-    mask = twtt >= twtt[-1] - duration
+    med = np.full(n_traces, np.nan)
+    peak = np.full(n_traces, np.nan)
+    std = np.full(n_traces, np.nan)
+    post_hi = twtt[-1] - post_end
+    anchor = np.asarray(anchor_twtt, dtype=float)
+    for i in range(n_traces):
+        a = anchor[i]
+        if not np.isfinite(a):
+            continue
+        post_lo = a + post_start
+        if post_hi <= post_lo:
+            continue
+        mask = (twtt >= post_lo) & (twtt <= post_hi)
+        if not mask.any():
+            continue
+        samples = data_lin[mask, i]
+        samples = samples[np.isfinite(samples)]
+        if samples.size == 0:
+            continue
+        med[i] = 10.0 * np.log10(np.median(samples))
+        pos = samples[samples > 0]
+        if pos.size:
+            db = 10.0 * np.log10(pos)
+            peak[i] = db.max()
+            std[i] = float(np.std(db))
+    return med, peak, std
+
+
+def compute_record_tail_noise(frame, noise_config):
+    """Per-trace median power (dB) in a window near the record end.
+
+    The window is ``[end - start_offset_us, end - end_offset_us]`` — both
+    offsets measured back from the last twtt sample. A nonzero end offset
+    blanks the post-processing rolloff seen in the final microseconds of many
+    seasons, which would otherwise bias the estimate low.
+
+    Pick-independent: defined whether or not a bed pick exists, giving every
+    trace a noise-floor estimate from below the ice. Where deep returns reach
+    the window this is an upper bound on the true noise floor (which makes
+    censoring bounds derived from it conservative).
+    """
+    cfg = _resolve_noise_config(noise_config)
+    start_offset = cfg["record_tail"]["start_offset_us"] * 1e-6
+    end_offset = cfg["record_tail"]["end_offset_us"] * 1e-6
+
+    twtt = frame.twtt.values
+    data_lin = np.abs(frame.Data.values)
+    if data_lin.shape[0] != twtt.size and data_lin.shape[1] == twtt.size:
+        data_lin = data_lin.T
+
+    n_traces = data_lin.shape[1]
+    mask = (twtt >= twtt[-1] - start_offset) & (twtt <= twtt[-1] - end_offset)
     if not mask.any():
         return np.full(n_traces, np.nan)
     with np.errstate(all="ignore"), warnings.catch_warnings():
@@ -260,16 +321,21 @@ def process_frame(opr: OPRConnection, stac_item, config: dict) -> xr.Dataset | N
             logger.warning("Frame %s: failed to load layers, skipping", frame_id)
             return None
 
-        bed_key = None
+        surface_key = bed_key = None
         if layers is not None:
+            surface_key = SURFACE_KEY if SURFACE_KEY in layers else (
+                SURFACE_FALLBACK_KEY if SURFACE_FALLBACK_KEY in layers else None
+            )
             bed_key = BED_KEY if BED_KEY in layers else (
                 BED_FALLBACK_KEY if BED_FALLBACK_KEY in layers else None
             )
-        if layers is None or SURFACE_KEY not in layers or bed_key is None:
+        if layers is None or surface_key is None or bed_key is None:
             available = list(layers.keys()) if layers else []
             logger.warning("Frame %s: missing layer picks (available: %s), skipping",
                            frame_id, available)
             return None
+        if surface_key != SURFACE_KEY:
+            logger.info("Frame %s: using surface layer %r (no %r)", frame_id, surface_key, SURFACE_KEY)
         if bed_key != BED_KEY:
             logger.info("Frame %s: using bed layer %r (no %r)", frame_id, bed_key, BED_KEY)
 
@@ -285,7 +351,7 @@ def process_frame(opr: OPRConnection, stac_item, config: dict) -> xr.Dataset | N
         # Add layer picks to frame so xopr QC checks can use them. The bed pick is
         # always stored under BED_KEY regardless of source key, since xopr QC
         # checks look it up by that name.
-        for frame_key, layer_key in ((SURFACE_KEY, SURFACE_KEY), (BED_KEY, bed_key)):
+        for frame_key, layer_key in ((SURFACE_KEY, surface_key), (BED_KEY, bed_key)):
             pick = layers[layer_key]["twtt"].reindex(
                 slow_time=frame.slow_time,
                 method="nearest",
@@ -370,7 +436,7 @@ def process_frame(opr: OPRConnection, stac_item, config: dict) -> xr.Dataset | N
         margin_twtt = proc["layer_margin_m"] / v_ice
 
         surface_twtt, surface_power = extract_layer_peak_power(
-            frame, layers[SURFACE_KEY]["twtt"], margin_twtt
+            frame, layers[surface_key]["twtt"], margin_twtt
         )
         bed_twtt, bed_power = extract_layer_peak_power(
             frame, layers[bed_key]["twtt"], margin_twtt
@@ -408,6 +474,36 @@ def process_frame(opr: OPRConnection, stac_item, config: dict) -> xr.Dataset | N
             coords={"slow_time": frame.slow_time},
         )
 
+        # Post-bed window metrics anchored at the pick where present, else a
+        # bed twtt linearly interpolated (in slow_time) between the segment's
+        # adjacent picks — defined on censored traces inside the picked span.
+        seg_t = layers[bed_key]["twtt"].slow_time.values.astype("datetime64[ns]").astype(np.int64)
+        finite_seg = np.isfinite(seg_bed_twtt)
+        ft = seg_t[finite_seg].astype(float)
+        fv = seg_bed_twtt[finite_seg]
+        order = np.argsort(ft)
+        ft, fv = ft[order], fv[order]
+        trace_t = frame.slow_time.values.astype("datetime64[ns]").astype(np.int64).astype(float)
+        interp_anchor = np.interp(trace_t, ft, fv)
+        interp_anchor[(trace_t < ft[0]) | (trace_t > ft[-1])] = np.nan
+        pick5 = np.asarray(frame[BED_KEY].values, dtype=float)
+        anchor = np.where(np.isfinite(pick5), pick5, interp_anchor)
+
+        interp_med, interp_peak, interp_std = compute_interp_bed_window_metrics(
+            frame, anchor, noise_config
+        )
+        as_da = lambda arr: xr.DataArray(
+            arr, dims=("slow_time",), coords={"slow_time": frame.slow_time}
+        )
+        post_bed_noise_interp_dB = as_da(interp_med)
+        post_bed_peak_interp_dB = as_da(interp_peak)
+        post_bed_std_interp_dB = as_da(interp_std)
+
+        # Last twtt sample of the record — lets users reconstruct the windows
+        # defined relative to the record end (post-bed, record tail). Recording
+        # metadata, so never QC-masked.
+        record_end_twtt = as_da(np.full(len(frame.slow_time), float(frame.twtt.values[-1])))
+
         qc_pass = qc_mask if qc_mask is not None else all_true
 
         # Surface-side metrics are masked only by pick-independent QC so that
@@ -420,6 +516,9 @@ def process_frame(opr: OPRConnection, stac_item, config: dict) -> xr.Dataset | N
             "surface_power_dB": surface_power,
             "pre_surface_noise_dB": pre_surface_noise_dB,
             "record_tail_noise_dB": record_tail_noise_dB,
+            "post_bed_noise_interp_dB": post_bed_noise_interp_dB,
+            "post_bed_peak_interp_dB": post_bed_peak_interp_dB,
+            "post_bed_std_interp_dB": post_bed_std_interp_dB,
         }
         bed_side = {
             "bed_twtt": bed_twtt,
@@ -443,6 +542,7 @@ def process_frame(opr: OPRConnection, stac_item, config: dict) -> xr.Dataset | N
                 "bed_pick_available": bed_pick_available,
                 "bed_pick_attempted": bed_pick_attempted,
                 "bed_pick_quality": bed_pick_quality,
+                "record_end_twtt": record_end_twtt,
                 "frame_id": ("slow_time", [str(frame_id)] * len(frame.slow_time)),
             },
             coords={

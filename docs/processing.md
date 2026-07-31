@@ -78,7 +78,9 @@ processing:
   noise:
     pre_surface: {start_offset_us: 1.0, end_offset_us: 1.0}
     post_bed:    {start_offset_us: 5.0, end_offset_us: 5.0}
-    record_tail: {duration_us: 5.0}   # pick-independent noise floor window
+    record_tail: {start_offset_us: 12.0, end_offset_us: 7.0}  # pick-independent
+      # noise window [end-start, end-end_offset]; the end gap blanks the
+      # post-processing rolloff in the record's final microseconds
 ```
 
 Set `opr.cache_dir` to a path to cache downloaded frames locally (fast reruns,
@@ -109,9 +111,10 @@ every incremental run.
 
 Note: some older seasons (pre-2012) lack the `Heading` variable and will fail the
 heading change check. Set `max_heading_change_deg_per_km: null` to process these.
-Some seasons (e.g. 2019_Antarctica_GV) publish bed picks under the `:bottom`
-layer key; the pipeline falls back to it automatically when `standard:bottom`
-is absent.
+Some seasons publish picks under empty-prefix layer keys (2019_Antarctica_GV
+bed picks as `:bottom`; some Greenland P3 segments' surface picks as
+`:surface`); the pipeline falls back to those automatically when the
+`standard:` keys are absent.
 
 ## Running the pipeline
 
