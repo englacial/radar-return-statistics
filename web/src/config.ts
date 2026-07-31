@@ -100,6 +100,21 @@ export const VARIABLES: Record<string, VariableInfo> = {
     cmap: "turbo",
     unit: "dB",
   },
+  post_bed_noise_interp_dB: {
+    label: "Post-Bed Noise (interp)",
+    cmap: "turbo",
+    unit: "dB",
+  },
+  post_bed_peak_interp_dB: {
+    label: "Post-Bed Peak (interp)",
+    cmap: "turbo",
+    unit: "dB",
+  },
+  post_bed_std_interp_dB: {
+    label: "Post-Bed Std (interp)",
+    cmap: "turbo",
+    unit: "dB",
+  },
   surface_twtt: {
     label: "Surface TWTT",
     cmap: "turbo",
