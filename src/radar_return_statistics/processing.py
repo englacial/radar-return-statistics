@@ -567,7 +567,11 @@ def process_frame(opr: OPRConnection, stac_item, config: dict) -> xr.Dataset | N
         n_qc_pass = int(qc_pass.sum())
         logger.info("Frame %s: processed successfully (%d traces, %d pass QC)",
                     frame_id, len(ds.slow_time), n_qc_pass)
-        return ds
+        # Force everything into memory: coords like Latitude are otherwise lazy
+        # references into the frame's cached netCDF file, which would make the
+        # parent process depend on the worker's temp files after the worker
+        # cleans them up.
+        return ds.load()
 
     except Exception:
         logger.exception("Frame %s: processing failed", frame_id)

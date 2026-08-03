@@ -96,10 +96,33 @@ def _antarctic_subregion_with_shelves(subregion):
 
 
 def _process_frame_worker(stac_item_row, config):
-    """Worker function for parallel processing. Creates its own OPR connection."""
+    """Worker function for parallel processing. Creates its own OPR connection.
+
+    When streaming (no cache_dir), fsspec's simplecache spools downloads into a
+    temp dir that is normally shared for the life of the worker process and
+    never cleaned — a run-length disk leak. Point it at a per-frame directory
+    and remove it when the frame is done (safe: process_frame returns a fully
+    loaded dataset with no references into the cached files).
+    """
     _configure_fsspec_timeout()
-    opr = OPRConnection(cache_dir=config["opr"].get("cache_dir"))
-    return process_frame(opr, stac_item_row, config)
+    cache_dir = config["opr"].get("cache_dir")
+    if cache_dir:
+        opr = OPRConnection(cache_dir=cache_dir)
+        return process_frame(opr, stac_item_row, config)
+
+    import shutil
+    import tempfile
+
+    import fsspec
+
+    workdir = tempfile.mkdtemp(prefix="rrs_frame_cache_")
+    fsspec.config.conf["simplecache"] = {"cache_storage": workdir}
+    try:
+        opr = OPRConnection(cache_dir=None)
+        return process_frame(opr, stac_item_row, config)
+    finally:
+        fsspec.config.conf.pop("simplecache", None)
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
 def run(config_path: str | None = None, *, config: dict | None = None, reprocess: bool = False, commit_message: str | None = None) -> None:
