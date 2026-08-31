@@ -6,6 +6,8 @@ Put any session notes, longer text analyses, purely temporary code, or any other
 
 Do not edit anything outside of this directory. Put any outputs into an `outputs/` directory.
 
+When long tasks are required, use subagents to perform them.
+
 Review the `docs/` directory before starting on any task. `docs/architecture.md` describes the basic outline.
 
 Run the tests (using pytest) after making any changes. Add tests to verify new functionality you've been asked to add, but do not modify existing tests without asking.
