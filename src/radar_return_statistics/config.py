@@ -3,16 +3,12 @@ from pathlib import Path
 import yaml
 
 
-def load_config(config_path: str | Path) -> dict:
-    """Load and return config from YAML file."""
-    config_path = Path(config_path)
-    if not config_path.exists():
-        raise FileNotFoundError(f"Config file not found: {config_path}")
+def normalize_config(config: dict) -> dict:
+    """Apply defaults in place and return the config.
 
-    with open(config_path) as f:
-        config = yaml.safe_load(f)
-
-    # Apply defaults
+    Shared by load_config and process_frame so behavior (notably the
+    calibration default) cannot depend on the entry point.
+    """
     config.setdefault("opr", {})
     config.setdefault("region", {})
     config.setdefault("query", {})
@@ -36,6 +32,14 @@ def load_config(config_path: str | Path) -> dict:
     post = noise.setdefault("post_bed", {})
     post.setdefault("start_offset_us", 5.0)
     post.setdefault("end_offset_us", 5.0)
+
+    # Radiometric calibration checks. img_combine defaults ON: the dataset is
+    # processed once and used many times, so the extra image downloads are
+    # accepted. Disable explicitly for quick test runs.
+    calibration = config["processing"].setdefault("calibration", {})
+    calibration.setdefault("img_combine", True)
+    calibration.setdefault("image_load_retries", 2)
+
     config.setdefault("qc", {})
     config["qc"].setdefault("max_heading_change_deg_per_km", None)
     config["qc"].setdefault("min_ice_thickness_m", None)
@@ -47,3 +51,15 @@ def load_config(config_path: str | Path) -> dict:
     config["store"].setdefault("remove_out_of_scope", False)
 
     return config
+
+
+def load_config(config_path: str | Path) -> dict:
+    """Load and return config from YAML file."""
+    config_path = Path(config_path)
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+
+    return normalize_config(config)

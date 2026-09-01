@@ -1,6 +1,6 @@
 import { IcechunkStore } from "@carbonplan/icechunk-js";
 import * as zarr from "zarrita";
-import { VARIABLE_SOURCE } from "./config";
+import { INT_SENTINEL_VARIABLES, VARIABLE_SOURCE } from "./config";
 
 export interface StoreData {
   latitude: Float64Array;
@@ -59,9 +59,10 @@ async function loadArray(
 function toFloat64Array(chunk: zarr.Chunk<zarr.DataType>): Float64Array {
   const data = chunk.data;
   if (data instanceof Float64Array) return data;
-  if (data instanceof Float32Array) return new Float64Array(data);
+  // Element-wise conversion: integer typed arrays (e.g. the int8 categorical
+  // variables) must be converted by value, never byte-reinterpreted.
   if (ArrayBuffer.isView(data))
-    return new Float64Array(data.buffer, data.byteOffset, data.byteLength / 8);
+    return Float64Array.from(data as unknown as ArrayLike<number>, Number);
   return new Float64Array(data as unknown as ArrayLike<number>);
 }
 
@@ -161,7 +162,14 @@ export async function loadVariables(
       const source = VARIABLE_SOURCE[name] ?? name;
       try {
         const chunk = await loadArray(store, source);
-        return [name, toFloat64Array(chunk)] as const;
+        const values = toFloat64Array(chunk);
+        // Integer variables use -1 as "unknown"; map it to NaN so the
+        // existing missing-value handling applies.
+        if (INT_SENTINEL_VARIABLES.has(name)) {
+          for (let i = 0; i < values.length; i++)
+            if (values[i] === -1) values[i] = NaN;
+        }
+        return [name, values] as const;
       } catch {
         return null;
       }

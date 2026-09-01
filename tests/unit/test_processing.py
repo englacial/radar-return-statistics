@@ -113,6 +113,8 @@ def test_process_frame_output_variables(mocker, synthetic_frame, synthetic_layer
         "record_end_twtt",
         "qc_pass", "qc_surface_pass", "qc_heading_pass", "qc_agl_pass",
         "bed_pick_available", "bed_pick_attempted", "bed_pick_quality", "frame_id",
+        "img_comb_offset_dB", "img_comb_pair", "surface_source_image_index",
+        "surface_ceiling_margin_dB",
     }
     assert ds.attrs["frame_bed_pick_fraction"] == 1.0
     assert ds.attrs["segment_bed_pick_fraction"] == 1.0

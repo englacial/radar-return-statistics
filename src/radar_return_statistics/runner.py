@@ -1,10 +1,12 @@
 import logging
+import math
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import aiohttp
 import fsspec
 import xarray as xr
+import zarr
 from xopr import OPRConnection
 from xopr import geometry as xopr_geometry
 
@@ -13,6 +15,23 @@ from .config import load_config
 from .processing import process_frame
 
 logger = logging.getLogger(__name__)
+
+
+def _finite_or_none(v):
+    f = float(v)
+    return f if math.isfinite(f) else None
+
+
+# Per-frame attrs carried from process_frame output into frame_names-parallel
+# root attribute lists, with a cast per attr (strings ride along uncast; NaN
+# floats become None so the JSON attrs stay valid).
+FRAME_ATTR_CASTS = {
+    "frame_bed_pick_fraction": float,
+    "segment_bed_pick_fraction": float,
+    "frame_img_comb_offset_dB": _finite_or_none,
+    "frame_img_comb_status": str,
+    "frame_img_comb_weights_mode": str,
+}
 
 
 # fsspec's HTTPFileSystem inherits aiohttp's default ~5min total timeout, but
@@ -205,10 +224,7 @@ def run(config_path: str | None = None, *, config: dict | None = None, reprocess
     # Per-checkpoint state — flushed at each checkpoint commit.
     batch_count = 0
     batch_frame_collections: dict[str, str] = {}
-    batch_frame_attrs: dict[str, dict[str, float]] = {
-        "frame_bed_pick_fraction": {},
-        "segment_bed_pick_fraction": {},
-    }
+    batch_frame_attrs: dict[str, dict[str, object]] = {k: {} for k in FRAME_ATTR_CASTS}
 
     # Use 'spawn' so workers don't inherit thread state (icechunk's tokio
     # runtime, aiohttp clients, etc.) from the parent. Fork+threads can
@@ -242,9 +258,9 @@ def run(config_path: str | None = None, *, config: dict | None = None, reprocess
                 col = str(ds.attrs["collection"])
                 batch_frame_collections[fid] = col
                 all_collections.add(col)
-            for attr_name in batch_frame_attrs:
+            for attr_name, cast in FRAME_ATTR_CASTS.items():
                 if attr_name in ds.attrs:
-                    batch_frame_attrs[attr_name][fid] = float(ds.attrs[attr_name])
+                    batch_frame_attrs[attr_name][fid] = cast(ds.attrs[attr_name])
             logger.info("Completed frame %s (%d/%d)", fid, total_frames_written, total_to_process)
 
             if checkpoint_every and batch_count >= checkpoint_every:
@@ -304,3 +320,14 @@ def run(config_path: str | None = None, *, config: dict | None = None, reprocess
             message = f"[run] {summary}"
     store.commit_session(session, message)
     logger.info("Done: %s", message)
+
+    # The saturation second pass fits season populations over the whole store;
+    # this run just changed the science data, so any prior results are stale.
+    try:
+        root = zarr.open_group(repo.readonly_session(branch="main").store, mode="r")
+        if store.saturation_stale(root):
+            logger.warning(
+                "Saturation second-pass results are stale after this run — re-run "
+                "`uv run python -m radar_return_statistics.saturation_pass <config>`")
+    except Exception:
+        pass
