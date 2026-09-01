@@ -28,6 +28,17 @@ represented for downstream missingness analyses.
 The `processed_frames` array tracks which frame IDs have been ingested, and
 `frame_index` maps each trace to the `frame_names` root attribute.
 
+Stores written with the calibration schema also carry radiometric calibration
+values to filter on: per-trace `img_comb_offset_dB` (residual image-combine
+seam step; a ~3 dB frame-mean cut is a typical downstream rejection
+threshold), `surface_source_image_index` (which image supplied the surface
+sample — a provenance flag: index >= 2 surfaces are more likely saturated,
+not inherently invalid), and `surface_ceiling_margin_dB` (distance below the
+season's fitted clip level; NaN where no credible ceiling exists), plus
+per-frame `frame_img_comb_status` / `frame_img_comb_offset_dB` attrs and the
+season-level `saturation` attr with the measured img2 bias
+(`cross_cap_step_db`). See architecture.md for full semantics.
+
 ## Python access
 
 ### Using icechunk + zarr directly

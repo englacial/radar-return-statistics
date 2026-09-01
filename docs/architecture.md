@@ -39,6 +39,29 @@ Per-trace (resampled) values stored with `slow_time` dimension:
   from missingness analyses as segment-edge quirks
 * `bed_pick_quality` - OPR layer quality flag (1 good / 2 moderate / 3 derived),
   -1 where no pick or flag unavailable
+* `img_comb_offset_dB` - residual seam offset of the frame's worst image pair:
+  the power step actually present in the combined product at the image-combine
+  transition, after recovering the effective per-image weights the combine
+  applied. Positive = the earlier (shallower) image is brighter. The pair is
+  fixed per frame (`img_comb_pair`); NaN where unmeasured (see
+  `frame_img_comb_status`). A downstream rejection threshold around 3 dB on
+  the frame mean is typical; no threshold is applied in the store.
+* `img_comb_pair` - which image pair `img_comb_offset_dB` refers to
+  (1 = img1/img2, 2 = img2/img3), -1 undefined
+* `surface_source_image_index` - which image the combined product's surface
+  sample came from (the combine transition is capped at the earlier image's
+  gate end minus its guard, so at high AGL the surface comes from a
+  higher-gain image). **Provenance flag, not a validity verdict**: index >= 2
+  surfaces are *more likely to be saturated* and may carry a season-dependent
+  low bias (~15-20 dB measured on 2014/2017 Greenland P3's img2 surface
+  response), but for high-altitude DC8 seasons surface-in-img2 is the normal
+  operating geometry. Downstream users decide filtering; the per-season
+  `cross_cap_step_db` attr is the measured bias estimate. -1 unknown
+  (images unavailable, e.g. 2013_Greenland_P3).
+* `surface_ceiling_margin_dB` - season ceiling (clip level) minus surface
+  power, computed against the trace's own source-image population's ceiling.
+  Written by the saturation second pass; NaN until it runs and wherever no
+  credible ceiling fit exists (a clean season has no ceiling).
 * `record_end_twtt` - twtt (s) of the last sample in the record; lets users
   reconstruct the record-end-relative windows (post-bed, record tail). Never
   QC-masked.
@@ -50,9 +73,21 @@ Per-trace (resampled) values stored with `slow_time` dimension:
 Coordinates: `latitude`, `longitude`, `elevation`
 
 Root attributes `frame_names`, `frame_collections`, `frame_bed_pick_fraction`,
-and `segment_bed_pick_fraction` are parallel lists (one entry per unique frame)
-giving each frame's season and bed-picking effort per frame / per segment. The
-per-trace `frame_index` array indexes into them.
+`segment_bed_pick_fraction`, `frame_img_comb_offset_dB` (worst-pair mean
+residual, None where unmeasured), `frame_img_comb_status` (`ok` /
+`no_combine` / `images_unavailable` / `partial_images` / `load_error` /
+`invalid_params` / `params_missing` / `insufficient_overlap` /
+`weight_recovery_failed` / `disabled`), and `frame_img_comb_weights_mode`
+are parallel lists (one entry per unique frame). The per-trace `frame_index`
+array indexes into them.
+
+The saturation second pass adds a root `saturation` attr: per-season fits
+keyed by season name (per population `img1` / `img2` — or `all` where the
+source index is unavailable — level, status, support, CI; plus
+`cross_cap_step_db`, the measured img1-vs-img2 population offset at the gate
+cap), the fit parameters, a method version, and a science-data fingerprint
+(trace count + hash of `processed_frames`). Science appends make the second
+pass stale (the runner warns); calibration-only writes do not.
 
 ### Missing bed picks as censored observations
 
@@ -83,11 +118,20 @@ handles versioning and incremental tracking (processed frame IDs stored in the z
 
 ### Modules
 
-* `config.py` - loads YAML config
+* `config.py` - loads YAML config (`normalize_config` applies shared defaults)
 * `processing.py` - per-frame metric extraction (ports `extract_layer_peak_power` algorithm)
-* `store.py` - icechunk read/write, frame tracking, commits
+* `calibration.py` - radiometric calibration checks: image-combine residual
+  seam offsets (effective-weight recovery + weight-corrected overlap) and
+  saturation ceiling fits (per-source-image populations)
+* `store.py` - icechunk read/write, frame tracking, commits; appends
+  auto-migrate (missing variables are created backfilled with fill values)
 * `runner.py` - orchestration: query, diff, process (parallel), write, commit
 * `__main__.py` - CLI entry point via click
+* `saturation_pass.py` - second pass: fit season ceilings over a completed
+  store, write `surface_ceiling_margin_dB` + season attrs
+* `calibration_backfill.py` - re-run the img-combine check for frames with
+  retryable statuses, updating calibration variables in place
+* `calibration_cli.py` - standalone read-only baseline runs (parquet + figures)
 
 ### How to run
 
@@ -116,6 +160,17 @@ Set `AWS_PROFILE` for local development.
 5. Write results sequentially to icechunk (append along `slow_time`)
 6. Commit with summary message; `processing.checkpoint_every: N` additionally
    commits every N frames so long runs are resumable
+
+During step 4 each frame also runs the image-combine calibration check
+(`processing.calibration.img_combine`, default on; ~3x wall time and ~2.5x
+download volume per frame from the individual image loads). Calibration
+failures degrade to a per-frame status and never fail a frame. After the
+science data is complete, run the saturation second pass:
+
+```bash
+uv run python -m radar_return_statistics.saturation_pass config/config_antarctica.yaml
+uv run python -m radar_return_statistics.calibration_backfill config/config_antarctica.yaml  # retry load_error/disabled frames
+```
 
 ### Testing
 

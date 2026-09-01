@@ -86,6 +86,40 @@ processing:
 Set `opr.cache_dir` to a path to cache downloaded frames locally (fast reruns,
 large disk footprint) or `null` to stream (used by the full-continent configs).
 
+### Calibration settings
+
+```yaml
+processing:
+  calibration:
+    img_combine: true        # default; set false for quick test runs
+    image_load_retries: 2    # transient-failure retries per image
+```
+
+With `img_combine: true` (the default) each frame additionally loads its
+individual images (`Data_img_NN_*`) and measures the residual seam offset at
+each image-combine transition plus `surface_source_image_index` — roughly 3x
+wall time and 2.5x download volume per frame. Failures degrade to a per-frame
+`frame_img_comb_status`; they never skip a frame. Frames left with a
+retryable status (`load_error`, `disabled`) can be filled in later:
+
+```bash
+uv run python -m radar_return_statistics.calibration_backfill config/config_antarctica.yaml
+```
+
+The saturation ceiling fit is a **second pass** over the completed store
+(population-level; no echogram loads):
+
+```bash
+uv run python -m radar_return_statistics.saturation_pass config/config_antarctica.yaml
+uv run python -m radar_return_statistics.saturation_pass config/config_antarctica.yaml --dry-run
+```
+
+It writes `surface_ceiling_margin_dB` and the season-level `saturation` root
+attr, stamped with a science-data fingerprint; the runner warns when later
+science appends make it stale. Appending to a store written before the
+calibration schema auto-migrates it (missing variables are created backfilled
+with NaN / -1).
+
 ### QC settings
 
 ```yaml

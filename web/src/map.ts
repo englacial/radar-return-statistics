@@ -257,6 +257,7 @@ export function tracesInPolygon(data: StoreData): number[] {
 
 export function formatScaledValue(value: number, info: VariableInfo): string {
   const scaled = (info.displayScale ?? 1) * value;
+  if (info.integer) return Math.round(scaled).toString();
   return scaled.toPrecision(4);
 }
 

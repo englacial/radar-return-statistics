@@ -1,4 +1,5 @@
 import logging
+import time
 import warnings
 
 import numpy as np
@@ -7,6 +8,9 @@ import scipy.constants
 import xarray as xr
 from xopr import OPRConnection
 from xopr import qc as xopr_qc
+
+from . import calibration
+from .config import normalize_config
 
 logger = logging.getLogger(__name__)
 
@@ -293,8 +297,71 @@ def _build_qc_checks(qc_config: dict) -> dict:
     return checks
 
 
+def decimate_frame(frame: xr.Dataset, decimate_interval) -> xr.Dataset:
+    """Keep the first trace of each decimation interval (deterministic, so a
+    later calibration backfill reproduces the pipeline's trace selection)."""
+    if not decimate_interval:
+        return frame
+    interval = pd.Timedelta(decimate_interval)
+    times = frame.slow_time.values
+    selected = [0]
+    last = times[0]
+    for idx in range(1, len(times)):
+        if times[idx] - last >= interval:
+            selected.append(idx)
+            last = times[idx]
+    return frame.isel(slow_time=selected)
+
+
+def run_frame_calibration(opr, stac_item, frame, proc_config, frame_id="?"):
+    """Image-combine calibration check for one frame, degraded to placeholders
+    plus a status on any failure — calibration never fails a frame.
+
+    Returns per-trace arrays (offsets/pair/source index) and frame-level attrs.
+    When weight recovery failed, the residuals are unreliable, so the store
+    gets NaN offsets (raw offsets live only in baseline-CLI parquet).
+    """
+    n = frame.sizes["slow_time"]
+    out = {
+        "img_comb_offset_dB": np.full(n, np.nan, dtype=np.float32),
+        "img_comb_pair": np.full(n, -1, dtype=np.int8),
+        "surface_source_image_index": np.full(n, -1, dtype=np.int8),
+        "status": calibration.STATUS_DISABLED,
+        "frame_offset": None,
+        "weights_mode": "",
+    }
+    cfg = proc_config.get("calibration", {})
+    if not cfg.get("img_combine", True):
+        return out
+    t0 = time.time()
+    try:
+        res = calibration.check_img_combine(
+            opr, stac_item, frame, proc_config["data_product"],
+            params={"image_load_retries": cfg.get("image_load_retries", 2)},
+        )
+        out["status"] = res["status"]
+        out["weights_mode"] = res["weights_mode"]
+        out["surface_source_image_index"] = np.asarray(
+            res["surface_source_image_index"], dtype=np.int8)
+        if res["worst_pair"] > 0 and res["status"] in (
+            calibration.STATUS_OK, calibration.STATUS_PARTIAL_IMAGES,
+        ):
+            out["img_comb_offset_dB"] = np.asarray(res["offsets"], dtype=np.float32)
+            out["img_comb_pair"][:] = res["worst_pair"]
+            summ = next(pp for pp in res["pairs"] if pp["pair"] == res["worst_pair"])
+            if np.isfinite(summ["mean"]):
+                out["frame_offset"] = float(summ["mean"])
+    except Exception:
+        logger.exception("Frame %s: calibration check failed; recording load_error", frame_id)
+        out["status"] = calibration.STATUS_LOAD_ERROR
+    logger.debug("Frame %s: calibration status=%s (%.1fs)",
+                 frame_id, out["status"], time.time() - t0)
+    return out
+
+
 def process_frame(opr: OPRConnection, stac_item, config: dict) -> xr.Dataset | None:
     """Process a single radar frame and return a Dataset of metrics, or None on failure."""
+    config = normalize_config(config)
     proc = config["processing"]
     qc_config = config.get("qc", {})
     frame_id = stac_item.name if hasattr(stac_item, "name") else stac_item.get("id", "unknown")
@@ -303,17 +370,7 @@ def process_frame(opr: OPRConnection, stac_item, config: dict) -> xr.Dataset | N
         frame = opr.load_frame(stac_item, data_product=proc["data_product"])
         frame = frame.sortby("slow_time")
 
-        decimate_interval = proc.get("decimate_interval")
-        if decimate_interval:
-            interval = pd.Timedelta(decimate_interval)
-            times = frame.slow_time.values
-            selected = [0]
-            last = times[0]
-            for idx in range(1, len(times)):
-                if times[idx] - last >= interval:
-                    selected.append(idx)
-                    last = times[idx]
-            frame = frame.isel(slow_time=selected)
+        frame = decimate_frame(frame, proc.get("decimate_interval"))
 
         try:
             layers = opr.get_layers(frame, include_geometry=False)
@@ -506,6 +563,34 @@ def process_frame(opr: OPRConnection, stac_item, config: dict) -> xr.Dataset | N
 
         qc_pass = qc_mask if qc_mask is not None else all_true
 
+        # Radiometric calibration (image-combine residual seam offsets +
+        # surface source image). Not QC-masking and never QC-masked: these are
+        # provenance/quality values downstream users filter on.
+        calib = run_frame_calibration(opr, stac_item, frame, proc, frame_id=frame_id)
+        img_comb_offset = as_da(calib["img_comb_offset_dB"]).assign_attrs(
+            description="Residual seam offset of the frame's worst image pair "
+                        "(weight-corrected; the step actually present in the "
+                        "combined product). Positive = earlier (shallower) "
+                        "image brighter. Pair is fixed per frame "
+                        "(img_comb_pair); NaN where unmeasured.",
+            units="dB",
+        )
+        img_comb_pair = as_da(calib["img_comb_pair"]).assign_attrs(
+            description="Image pair img_comb_offset_dB refers to "
+                        "(1 = img1/img2, 2 = img2/img3); -1 undefined.")
+        surface_source_image_index = as_da(calib["surface_source_image_index"]).assign_attrs(
+            description="Image the combined product's surface sample came from. "
+                        "Provenance flag, not a validity verdict: index >= 2 "
+                        "surfaces are more likely saturated and may carry a "
+                        "season-dependent low bias. -1 unknown.")
+        surface_ceiling_margin_dB = as_da(
+            np.full(len(frame.slow_time), np.nan, dtype=np.float32)).assign_attrs(
+            description="Season ceiling minus surface power; filled by the "
+                        "saturation second pass, NaN until then / where no "
+                        "credible ceiling fit exists.",
+            units="dB",
+        )
+
         # Surface-side metrics are masked only by pick-independent QC so that
         # traces missing a bed pick (or failing thin-ice / bed-SNR checks) keep
         # the surface power and noise floor needed to treat the missing bed as
@@ -543,6 +628,10 @@ def process_frame(opr: OPRConnection, stac_item, config: dict) -> xr.Dataset | N
                 "bed_pick_attempted": bed_pick_attempted,
                 "bed_pick_quality": bed_pick_quality,
                 "record_end_twtt": record_end_twtt,
+                "img_comb_offset_dB": img_comb_offset,
+                "img_comb_pair": img_comb_pair,
+                "surface_source_image_index": surface_source_image_index,
+                "surface_ceiling_margin_dB": surface_ceiling_margin_dB,
                 "frame_id": ("slow_time", [str(frame_id)] * len(frame.slow_time)),
             },
             coords={
@@ -552,6 +641,10 @@ def process_frame(opr: OPRConnection, stac_item, config: dict) -> xr.Dataset | N
         )
         ds.attrs["frame_bed_pick_fraction"] = float(bed_pick_available.values.mean())
         ds.attrs["segment_bed_pick_fraction"] = segment_bed_pick_fraction
+        ds.attrs["frame_img_comb_status"] = calib["status"]
+        ds.attrs["frame_img_comb_weights_mode"] = calib["weights_mode"]
+        if calib["frame_offset"] is not None:
+            ds.attrs["frame_img_comb_offset_dB"] = calib["frame_offset"]
         if "Elevation" in frame:
             ds.coords["elevation"] = frame.Elevation
 

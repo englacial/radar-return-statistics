@@ -50,6 +50,14 @@ export const BED_SIDE_VARIABLES = new Set([
   "post_bed_noise_dB",
 ]);
 
+// int8 categorical variables using -1 as the "unknown" sentinel; loaded via
+// element-wise integer conversion and shown as integers (never through the
+// float byte-reinterpret path).
+export const INT_SENTINEL_VARIABLES = new Set([
+  "surface_source_image_index",
+  "img_comb_pair",
+]);
+
 export interface VariableInfo {
   label: string;
   cmap: string;
@@ -57,6 +65,8 @@ export interface VariableInfo {
   // Multiplier applied when formatting values for display (legend + tooltip).
   // Stored data is unchanged; e.g. TWTT is stored in seconds but shown as µs.
   displayScale?: number;
+  // Categorical/integer variable: format values without decimals.
+  integer?: boolean;
 }
 
 export const VARIABLES: Record<string, VariableInfo> = {
@@ -112,6 +122,22 @@ export const VARIABLES: Record<string, VariableInfo> = {
   },
   post_bed_std_interp_dB: {
     label: "Post-Bed Std (interp)",
+    cmap: "turbo",
+    unit: "dB",
+  },
+  img_comb_offset_dB: {
+    label: "Img-Combine Seam Offset",
+    cmap: "turbo",
+    unit: "dB",
+  },
+  surface_source_image_index: {
+    label: "Surface Source Image",
+    cmap: "turbo",
+    unit: "",
+    integer: true,
+  },
+  surface_ceiling_margin_dB: {
+    label: "Surface Ceiling Margin",
     cmap: "turbo",
     unit: "dB",
   },

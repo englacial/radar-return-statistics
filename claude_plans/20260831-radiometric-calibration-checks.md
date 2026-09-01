@@ -1,7 +1,49 @@
 # Radiometric calibration checks: image-combine errors and surface saturation
 
-Status: **planned** (experiments done, Codex review incorporated 2026-08-31,
-implementation not started).
+Status: **steps 1–6 implemented 2026-08-31** (baseline:
+`claude_notes/calibration_baseline_results.md`; two-regime resolution:
+`claude_notes/two_regime_investigation.md`; integration notes:
+`claude_notes/calibration_integration_notes.md`). Verified against a local
+smoke store; awaiting user review before any production run. **Reminder owed
+to user: revisit the never-firing piecewise saturation model once more data
+has been processed.**
+
+## User decisions from baseline review (2026-08-31)
+
+1. **Two-regime seasons — RESOLVED** (`claude_notes/two_regime_investigation.md`):
+   the second "regime" is surface-from-img2 traces forced in by the img1 gate
+   cap (`T_end(img1) − T_guard`); params ruled out (identical settings both
+   sides of the step within single frames). User decisions on the follow-ups
+   (2026-08-31):
+   - `surface_source_image_index` is a **provenance flag, not a validity
+     verdict**: img2-sourced surfaces are *more likely saturated* and may
+     carry a season-dependent low bias (~15–20 dB measured on 2014/2017 GL
+     P3's img2 surface response), but for high-altitude DC8 seasons the
+     surface landing in img2 is the normal operating geometry — blanket
+     exclusion would discard ~19–27% of the 2012/2014/2016 Antarctica DC8
+     seasons (`claude_notes/img2_surface_fraction.py`: greenland store ~2%
+     affected overall, antarctica ~9%, concentrated in DC8 seasons). Document
+     the likelihood/bias in docs + variable attrs; downstream filters.
+   - The saturation second pass fits the **img1-sourced and img2-sourced
+     populations separately** per season (each with its own level/status/
+     support in the season dict), and reports the cross-cap step (img1 vs
+     img2 population offset at the cap) as the per-season empirical bias
+     estimate — measured, not assumed.
+   - Per-trace `surface_ceiling_margin_dB` is computed against the ceiling of
+     the trace's own source population when that population's fit is
+     `fit_ok`, else NaN.
+   - `min_span_decades` = **0.25 everywhere** (user decision at integration
+     review: one uniform minimum, no special-casing by population; supersedes
+     the earlier 0.5 whole-season minimum — 2019_GV's 0.42-decade span now
+     passes support as a side effect).
+2. **insufficient_overlap**: keep honest NaN (no relaxed window).
+3. **Piecewise model**: keep for now; **revisit after it has run on more
+   data** — remind the user at the next review checkpoint (post-integration
+   test runs / production baseline).
+4. **2019_GV span minimum**: leave as is.
+5. **No cross-store pooling** — no guarantee the same instrument flew both
+   ice sheets. **Only the antarctica and greenland stores matter for now**;
+   ignore ase/utig/crosssystem in calibration work.
 Branch: `calibration-checks`. **No pushes to the online S3 stores** — all runs
 against local stores / `outputs/` until explicitly approved.
 Experiment details: `claude_notes/radiometric_calibration_experiments.md`.
@@ -83,12 +125,16 @@ stages: (1) a standalone CLI for baseline runs writing to
    `imgs[0] = [[1,...],[1..6]]` → wf 1, adcs 1–6). `Tpd_img_i =
    radar.wfs.Tpd[wf−1]` — **never index Tpd by image number**: Tpd arrays can
    carry per-wf-adc duplicates (2018 P3: `[1,1,3,3,10,10] µs` for images with
-   wf pairs). Warn if the wfs of one image disagree on Tpd. Only if `imgs` is
-   missing do we fall back to a bounded probe (max 4 images), with typed
-   error handling: HTTP 404 = image permanently absent; timeouts/5xx =
-   transient → bounded retry, then status `load_error` (retryable later), so
-   a transient failure or a missing intermediate file is never recorded as
-   "no more images".
+   wf pairs). Warn if the wfs of one image disagree on Tpd. Image-count
+   precedence: `imgs` list (primary); else `len(img_comb)/3 + 1` when a valid
+   `img_comb` vector exists; else a bounded probe capped at **3 images** (per
+   user: 3 is the normal maximum, some seasons use 2, none known to use
+   more — the "7 imgs" seen in 2014-era params is the old per-wf-adc format,
+   not 7 real images, and is treated as suspect → verify at baseline). Typed
+   error handling throughout: HTTP 404 = image permanently absent;
+   timeouts/5xx = transient → bounded retry, then status `load_error`
+   (retryable later), so a transient failure or a missing intermediate file
+   is never recorded as "no more images".
 3. **Effective weight recovery** — per image i, compute the per-trace
    `median(combined − img_i)` over the section of the combined product
    sourced from img_i (between the adjacent per-trace combine boundaries,
@@ -121,18 +167,28 @@ stages: (1) a standalone CLI for baseline runs writing to
      `td_surf` is the frame's `Surface` variable (the value `img_combine`
      used), NaN → 0 per the OPR convention.
    - Per-trace `offset = median((dB_a + w_a) − (dB_b + w_b))` over bins where
-     both images are >6 dB above their own noise floor (median of the last-2µs
-     record tail; if an image is too short for a tail window, use its global
-     10th percentile instead — the weight shifts both signal and floor
-     equally, so the SNR gate is weight-independent). Require ≥10 valid bins
-     per trace (else NaN) and ≥30 valid traces per pair (else pair status
-     `insufficient_overlap`).
+     both images are >6 dB above their own noise floor. The per-image noise
+     floor uses the pipeline's record-tail convention — window
+     `[end − 12 µs, end − 7 µs]` per image, matching `record_tail` defaults —
+     further clipped to end before `T_end − T_guard`, since images show the
+     same end-of-record rolloff the tail-window study found in combined
+     products (a last-2µs window would be biased low). If the image is too
+     short for that window, fall back to its global 10th percentile;
+     validate the fallback during the baseline run. The weight shifts signal
+     and floor equally, so the SNR gate is weight-independent. Require ≥10
+     valid bins per trace (else NaN) and ≥30 valid traces per pair (else
+     pair status `insufficient_overlap`).
    - Sign convention (documented in variable attrs): positive = the earlier
      (lower-index, shallower) image is brighter than the later one.
 5. **Computed metrics**, per frame and pair:
    - *per-trace offset* — as above (median over bins within the trace).
    - *mean offset* — mean of the per-trace offsets along the frame (the
-     headline value; downstream threshold ~3 dB).
+     headline value; downstream threshold ~3 dB). Mean is a user decision;
+     each per-trace value is already a median over bins, which absorbs
+     within-trace outliers. The baseline run reports mean vs median per frame
+     as a sensitivity check — if heavy-tailed frames make them diverge enough
+     to move worst-pair selection or cross a ~3 dB threshold, revisit (MAD
+     flags such frames regardless).
    - *offset MAD* — median absolute deviation (×1.4826) of the per-trace
      offsets: a robust spread / measurement-quality indicator, distinct from
      the mean (mean +1 dB, MAD 0.3 dB = clean and stable; mean +1 dB, MAD
@@ -190,29 +246,43 @@ no single frame spans enough range diversity to reveal it — so it is a second
 pass over a completed store (cheap, no echogram loads; runs from
 `surface_power_dB`, `surface_twtt`, `qc_surface_pass`, `frame_index`).
 
-1. Range to surface `r = c·surface_twtt/2`; restrict to
-   `surface_source_image_index == 1` traces where the variable exists and is
-   populated; else all traces. The population used is recorded per season as
-   `ceiling_fit_population` ∈ {`img1_only`, `all_traces`} (the latter covers
-   both pre-schema stores and seasons like 2013_Greenland_P3 where indices
-   are −1 — the saturation signal there is too important to drop).
+1. Range to surface `r = c·surface_twtt/2`; where
+   `surface_source_image_index` is populated, fit the img1-sourced and
+   img2-sourced populations **separately** (per the two-regime resolution
+   above), each with its own level/status/support recorded in the season
+   dict, plus the cross-cap step (img1-vs-img2 population offset at the gate
+   cap) as the season's empirical img2 bias estimate. Where the index is
+   unavailable (pre-schema stores, 2013_Greenland_P3's −1s), fall back to a
+   single all-traces fit; `ceiling_fit_population` records which mode ran
+   (`by_source_image` / `all_traces`).
 2. **Ceiling estimate per season**: binned upper-quantile (99th) power vs
    `log10(r)`.
    - *Plateau detection first*: a clean season has no physical ceiling, so a
-     season-wide max would mislabel ordinary close-range returns. Fit the
-     binned upper quantile vs `log10(r)` robustly (Theil–Sen); declare a
-     plateau only when the fitted slope is ≫ shallower than −20 dB/decade
-     (threshold set from baseline-run distributions, with bootstrap CI) over
-     sufficient support: minimum traces per bin, minimum occupied bins, and
-     minimum log-range span (defaults to fix during implementation; all
-     recorded as metadata).
+     season-wide max would mislabel ordinary close-range returns. The
+     physical model is a constant clip level: partial saturation shows as a
+     flat upper envelope at short range transitioning to ~−20 dB/decade
+     where the unsaturated envelope drops below the clip level — a single
+     whole-season slope would average the two regimes and miss it. Use a
+     **contiguous low-range plateau detector / piecewise fit** (plateau
+     level + breakpoint + free slope beyond), compared against a pure-slope
+     model; declare a plateau only when the piecewise model wins with the
+     plateau segment ≫ shallower than −20 dB/decade over sufficient support:
+     minimum traces per bin, minimum occupied bins, and minimum log-range
+     span (defaults to fix during implementation via the baseline runs; all
+     recorded as metadata, with bootstrap CI on the plateau level). The
+     plateau level is the season ceiling; margins against it remain valid at
+     all ranges (distance below the clip level).
    - Season fit status: `fit_ok` / `no_plateau` / `insufficient_support`.
    - *Pile-up test*: fraction of traces within 1 dB of the ceiling
      (only when `fit_ok`).
    - *Regime check*: during the baseline run, repeat the fit per segment and
      inspect ceiling multimodality within a season (mixed receiver/waveform
      settings); if a season is multimodal, fall back to per-segment ceilings
-     before writing per-trace margins.
+     before writing per-trace margins. In that case the second pass writes a
+     `segment_saturation` dict (keyed by segment ID, same fields as the
+     season dict: level, status, support, CI) so per-trace margins remain
+     explainable downstream; season attrs then record
+     `ceiling_scope='segment'`.
 3. **Per-trace value** `surface_ceiling_margin_dB` = ceiling −
    surface_power_dB, written **only when the season (or segment) fit is
    `fit_ok`**; NaN otherwise — no credible plateau means no margin, never a
@@ -250,22 +320,32 @@ Season-level attrs from the second pass, as a dict keyed by season name (no
 bare parallel lists): per season — `ceiling_dB`, `slope_dB_per_decade`,
 `slope_ci`, `pileup_fraction`, `fit_status`, `ceiling_fit_population`,
 `n_traces`, `n_bins`, `log_range_span`, plus global `calibration_method_version`
-and every fixed threshold used. Second-pass results also record the store
-snapshot/commit they were computed from; appends/removals/reprocessing after
-that snapshot mean the second pass must be re-run (the runner prints a warning
-when the recorded snapshot is stale).
+and every fixed threshold used. Staleness is tracked by a **science-data
+fingerprint**, not a commit ID (the second pass's own write would otherwise
+make its result look stale immediately): the second pass records
+`(len(slow_time), sha256(sorted processed_frames))` at fit time; any science
+append/removal/reprocess changes the fingerprint, while calibration-only
+writes do not. The runner warns when the current fingerprint differs from the
+recorded one (second pass needs re-running).
 
 None of these are QC-masking; they are values downstream users filter on.
 
 **Migration/backfill**: `_zarr_append` silently skips variables absent from an
-existing store (`store.py:88`), so existing stores need explicit migration: a
-backfill command creates the new arrays sized to the current `slow_time`
-(NaN/−1), after which appends carry them forward. `runner.py`'s frame-attr
-plumbing (`batch_frame_attrs`, currently `dict[str, dict[str, float]]` with a
-`float()` cast) is extended to typed per-frame attrs so string statuses ride
-along. Direct `process_frame` callers whose configs bypass `load_config`
-defaults get safe behavior via `config.get(...)` defaults inside
-`processing.py` (calibration off → placeholder outputs, never a KeyError).
+existing store (`store.py:88`) — that silent skip is removed, not worked
+around: **append auto-migrates**. When an incoming dataset carries a variable
+the store lacks, `_zarr_append` creates the array sized to the store's current
+`slow_time` filled with the variable's fill value (NaN / −1), logs it loudly,
+then appends — so an ordinary processing run against a pre-calibration store
+migrates itself and can never silently drop calibration columns. (The
+standalone backfill command remains for retryable-status recomputation, not as
+a migration prerequisite.) `runner.py`'s frame-attr plumbing
+(`batch_frame_attrs`, currently `dict[str, dict[str, float]]` with a `float()`
+cast) is extended to typed per-frame attrs so string statuses ride along.
+Entry-point defaults are unified by a shared config-normalization helper used
+by both `load_config` and `process_frame`: calibration defaults **on**
+everywhere, so behavior cannot depend on the entry point; callers that need it
+off (unit tests, quick runs) set `processing.calibration.img_combine: false`
+explicitly.
 
 Config: `processing.calibration.img_combine: true` (default true; disable for
 quick test runs) and `processing.calibration.image_load_retries`.
@@ -282,10 +362,12 @@ quick test runs) and `processing.calibration.image_load_retries`.
    dimension orders; `weight_recovery_failed` on inconsistent sections;
    short-image noise-floor fallback; insufficient-overlap and
    transient-vs-404 statuses.
-2. Saturation second-pass functions (plateau fit / pile-up / margin) on plain
-   numpy arrays; unit tests with synthetic clean, clipped,
-   mixed/insufficient-support, and multimodal populations (clean season must
-   yield `no_plateau` and all-NaN margins).
+2. Saturation second-pass functions (piecewise plateau fit / pile-up /
+   margin) on plain numpy arrays; unit tests with synthetic clean, fully
+   clipped, **partially clipped** (plateau at short range, −20 dB/decade
+   beyond the breakpoint), mixed/insufficient-support, and multimodal
+   populations (clean season must yield `no_plateau` and all-NaN margins;
+   partial clipping must recover the plateau level).
 3. Standalone CLI (`--check {img-combine,saturation}`,
    `--sample-per-segment N`) writing parquet + figures to
    `outputs/calibration/<name>/`. Sampling: frames grouped by OPR segment
@@ -305,9 +387,11 @@ quick test runs) and `processing.calibration.image_load_retries`.
    runtime, and worker temp-disk growth on a sample before default-on
    production use (images multiply per-frame downloads ~×N; load pairs
    sequentially and release each image after use; mind the recently fixed
-   /tmp cache growth). Tests: append to a pre-calibration store, enabled→
-   disabled→enabled transitions, backfill of retryable statuses, second-pass
-   staleness warning. Test against a local store (`test_config.yaml`).
+   /tmp cache growth). Tests: append to a pre-calibration store auto-migrates
+   (arrays created, backfilled with fill values, loud log), enabled→
+   disabled→enabled transitions, backfill of retryable statuses, fingerprint
+   staleness warning (calibration-only write stays fresh; science append goes
+   stale). Test against a local store (`test_config.yaml`).
    **Stop before any production store update.**
 6. Docs & viewer (with integration): `docs/architecture.md`,
    `docs/data_access.md`, `docs/processing.md`; viewer handles the int8

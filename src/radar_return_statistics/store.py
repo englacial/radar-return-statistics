@@ -1,3 +1,4 @@
+import hashlib
 import logging
 
 import numpy as np
@@ -7,6 +8,20 @@ import zarr
 from xarray.coding.times import encode_cf_datetime
 
 logger = logging.getLogger(__name__)
+
+
+def _fill_value_for(dtype: np.dtype):
+    """Fill value used when backfilling a variable that predates the store."""
+    dtype = np.dtype(dtype)
+    if np.issubdtype(dtype, np.floating):
+        return np.nan
+    if np.issubdtype(dtype, np.bool_):
+        return False
+    if np.issubdtype(dtype, np.signedinteger):
+        return -1
+    if dtype.kind in ("U", "S"):
+        return ""
+    return 0
 
 # Per-trace zarr arrays are appended to over the lifetime of the store. xarray's
 # default chunking on first write is the length of the first frame (~38 traces),
@@ -79,14 +94,22 @@ def _zarr_append(root: zarr.Group, ds: xr.Dataset) -> None:
     encoded_times, _, _ = encode_cf_datetime(ds.slow_time.values, units=units, calendar=calendar)
     arrays["slow_time"] = np.asarray(encoded_times)
 
+    existing_size = st_arr.shape[0]
     for name, data in arrays.items():
-        if name in root:
-            arr = root[name]
-            old_size = arr.shape[0]
-            arr.resize(old_size + n_new)
-            arr[old_size:] = data
-        # Variables present in new frames but not yet in store (e.g. required_surface_snr_dB)
-        # are silently skipped — they won't appear until a --reprocess run.
+        if name not in root:
+            # Auto-migrate: a variable the store predates is created sized to
+            # the current store, backfilled with its fill value, then appended
+            # to like any other — never silently dropped.
+            fill = _fill_value_for(data.dtype)
+            logger.warning(
+                "Store migration: creating missing variable %r (%s), backfilling "
+                "%d existing traces with %r", name, data.dtype, existing_size, fill)
+            root.create_array(name, shape=(existing_size,), dtype=data.dtype,
+                              chunks=(PER_TRACE_CHUNK_SIZE,), fill_value=fill)
+        arr = root[name]
+        old_size = arr.shape[0]
+        arr.resize(old_size + n_new)
+        arr[old_size:] = data
 
 
 def write_frame_results(
@@ -169,7 +192,7 @@ def clear_store(session: icechunk.Session) -> None:
 def update_frame_index(
     session: icechunk.Session,
     frame_collections: dict[str, str] | None = None,
-    frame_scalar_attrs: dict[str, dict[str, float]] | None = None,
+    frame_scalar_attrs: dict[str, dict[str, object]] | None = None,
 ) -> None:
     """Rebuild frame_index (uint16 per trace) and frame_names root attribute from frame_id.
 
@@ -237,3 +260,91 @@ def commit_session(session: icechunk.Session, message: str) -> str:
     snapshot_id = session.commit(message)
     logger.info("Committed: %s (snapshot: %s)", message, snapshot_id)
     return snapshot_id
+
+
+def science_fingerprint(root: zarr.Group) -> dict:
+    """Fingerprint of the science data: trace count + hash of the processed
+    frame set. Science appends/removals/reprocessing change it; calibration-only
+    writes (saturation second pass, backfill) do not — so second-pass staleness
+    can be judged without being invalidated by its own commit."""
+    n = int(root["slow_time"].shape[0]) if "slow_time" in root else 0
+    frames = sorted(root["processed_frames"][:].tolist()) if "processed_frames" in root else []
+    digest = hashlib.sha256("\n".join(frames).encode()).hexdigest()
+    return {"n_traces": n, "frames_sha256": digest}
+
+
+def saturation_stale(root: zarr.Group) -> bool | None:
+    """True if the stored saturation second-pass results predate the current
+    science data; None if no second pass has been run."""
+    meta = root.attrs.get("saturation")
+    if not meta:
+        return None
+    return meta.get("fingerprint") != science_fingerprint(root)
+
+
+def write_saturation_results(
+    session: icechunk.Session,
+    margins: np.ndarray,
+    saturation_attrs: dict,
+) -> None:
+    """Write second-pass results: per-trace surface_ceiling_margin_dB plus the
+    root `saturation` attr (season fits, params, method version), stamped with
+    the current science fingerprint."""
+    root = zarr.open_group(session.store, mode="a")
+    n = root["slow_time"].shape[0]
+    margins = np.asarray(margins, dtype=np.float32)
+    if margins.shape != (n,):
+        raise ValueError(f"margins shape {margins.shape} != store traces ({n},)")
+    attrs = {}
+    if "surface_ceiling_margin_dB" in root:
+        attrs = dict(root["surface_ceiling_margin_dB"].attrs)
+    root.create_array("surface_ceiling_margin_dB", data=margins,
+                      chunks=(PER_TRACE_CHUNK_SIZE,), overwrite=True)
+    if attrs:
+        root["surface_ceiling_margin_dB"].attrs.update(attrs)
+    root.attrs["saturation"] = {**saturation_attrs,
+                                "fingerprint": science_fingerprint(root)}
+
+
+def update_frame_calibration(
+    session: icechunk.Session,
+    frame_id: str,
+    per_trace: dict[str, np.ndarray],
+    frame_attrs: dict[str, object],
+) -> int:
+    """Rewrite one frame's calibration values in place (backfill of retryable
+    statuses) without touching science metrics. Returns traces updated (0 if
+    the frame is absent or its trace count changed)."""
+    root = zarr.open_group(session.store, mode="a")
+    if "frame_id" not in root:
+        return 0
+    idx = np.where(root["frame_id"][:] == frame_id)[0]
+    if idx.size == 0:
+        return 0
+    n_total = root["frame_id"].shape[0]
+    for name, vals in per_trace.items():
+        vals = np.asarray(vals)
+        if vals.shape != idx.shape:
+            logger.warning("Backfill %s: %s has %d values for %d traces; skipping",
+                           frame_id, name, vals.size, idx.size)
+            continue
+        if name not in root:
+            fill = _fill_value_for(vals.dtype)
+            root.create_array(name, shape=(n_total,), dtype=vals.dtype,
+                              chunks=(PER_TRACE_CHUNK_SIZE,), fill_value=fill)
+        arr = root[name]
+        if idx.size and np.all(np.diff(idx) == 1):
+            arr[idx[0]: idx[-1] + 1] = vals
+        else:
+            arr.oindex[idx] = vals
+
+    frame_names = list(root.attrs.get("frame_names", []) or [])
+    if frame_id in frame_names:
+        pos = frame_names.index(frame_id)
+        for attr_name, value in frame_attrs.items():
+            prev = root.attrs.get(attr_name)
+            lst = list(prev) if isinstance(prev, (list, tuple)) else [None] * len(frame_names)
+            lst += [None] * (len(frame_names) - len(lst))
+            lst[pos] = value
+            root.attrs[attr_name] = lst
+    return int(idx.size)
