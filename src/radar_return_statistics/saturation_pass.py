@@ -24,7 +24,7 @@ from .config import load_config
 
 logger = logging.getLogger(__name__)
 
-METHOD_VERSION = "0.2.0"
+METHOD_VERSION = "0.3.0"  # 0.3.0: sparse-adjacent-bin merging in range binning
 
 
 def _jsonable(obj):

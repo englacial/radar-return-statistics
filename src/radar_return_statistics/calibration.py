@@ -662,18 +662,33 @@ def _theil_sen(x, y):
 
 
 def _binned_upper_quantile(power_db, range_m, params):
+    """Equal-width bins in log10(range), with adjacent sparse bins merged.
+
+    Equal-width base bins keep bin spacing (and hence slope estimation)
+    faithful to the range geometry rather than the altitude histogram. Bins
+    under min_traces_per_bin are greedily merged with the next bin(s) until
+    they reach the floor, so a thin ceiling-following tail (2012 DC8 img1:
+    95% of traces at 400-700 m, real tail to 3 km) contributes a few wide
+    bins that extend the fitted span instead of being discarded — without
+    concentrating extra bins in the dense band, which would dilute the
+    Theil-Sen slope and admit false flats. Bin x = median log10(r) of the
+    (merged) bin's traces; a trailing merged bin still under the floor is
+    dropped.
+    """
     logr = np.log10(range_m)
     lo, hi = np.percentile(logr, [1, 99])
     edges = np.linspace(lo, hi, params["n_bins"] + 1)
     idx = np.digitize(logr, edges)
     xs, qs, ns = [], [], []
+    pend_sel = np.zeros(logr.size, dtype=bool)
     for b in range(1, params["n_bins"] + 1):
-        sel = idx == b
-        n = int(sel.sum())
+        pend_sel |= idx == b
+        n = int(pend_sel.sum())
         if n >= params["min_traces_per_bin"]:
-            xs.append(0.5 * (edges[b - 1] + edges[b]))
-            qs.append(np.percentile(power_db[sel], params["quantile"]))
+            xs.append(float(np.median(logr[pend_sel])))
+            qs.append(float(np.percentile(power_db[pend_sel], params["quantile"])))
             ns.append(n)
+            pend_sel = np.zeros(logr.size, dtype=bool)
     return np.asarray(xs), np.asarray(qs), np.asarray(ns)
 
 

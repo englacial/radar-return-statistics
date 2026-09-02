@@ -264,6 +264,28 @@ def test_clean_population_no_plateau():
     assert np.all(np.isnan(margins))
 
 
+def test_dense_blob_thin_tail_clipped():
+    """2012 DC8 img1 shape: ~98% of traces packed into a narrow range band,
+    a real ceiling-following tail so thin its equal-width bins individually
+    fail the per-bin floor. Sparse-bin merging must keep the tail's support
+    so the clipped population fits, with the full span reported."""
+    rng = np.random.default_rng(1)
+    n_blob, n_tail = 19000, 350
+    r = np.concatenate([
+        10 ** rng.uniform(np.log10(400), np.log10(700), n_blob),
+        10 ** rng.uniform(np.log10(700), np.log10(3000), n_tail),
+    ])
+    p = np.minimum(20.0 - 20.0 * np.log10(r) + rng.normal(0, 2.0, r.size), -33.0)
+    fit = cal.fit_ceiling(p, r)
+    assert fit["status"] == cal.FIT_OK
+    assert fit["level"] == pytest.approx(-33.0, abs=1.0)
+    # tail support retained (blob alone spans 0.24; merged tail bins extend it)
+    assert fit["span_decades"] > 0.3
+    # same blob without the clip must not produce a ceiling
+    p_clean = 20.0 - 20.0 * np.log10(r) + rng.normal(0, 2.0, r.size)
+    assert cal.fit_ceiling(p_clean, r)["status"] != cal.FIT_OK
+
+
 def test_fully_clipped_population():
     p, r = _population(clip=-45.0)
     # clip at -45: unsaturated envelope is ~-30 at 300m, ~-52 at 4km -> flat
