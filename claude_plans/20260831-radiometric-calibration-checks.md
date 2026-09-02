@@ -1,12 +1,14 @@
 # Radiometric calibration checks: image-combine errors and surface saturation
 
-Status: **steps 1–6 implemented 2026-08-31** (baseline:
-`claude_notes/calibration_baseline_results.md`; two-regime resolution:
-`claude_notes/two_regime_investigation.md`; integration notes:
-`claude_notes/calibration_integration_notes.md`). Verified against a local
-smoke store; awaiting user review before any production run. **Reminder owed
-to user: revisit the never-firing piecewise saturation model once more data
-has been processed.**
+Status: **COMPLETE 2026-09-01.** All checks implemented, integrated
+(method 0.4.0: flat rule only, sparse-bin merging, piecewise dropped by user
+decision), backfilled across ase/greenland/antarctica, verified (science
+arrays byte-identical; only calibration fields added), and pushed to S3.
+PR: https://github.com/englacial/radar-return-statistics/pull/4.
+Dataset-facing summary: `docs/dataset_changelog.md`. Working notes:
+`claude_notes/calibration_baseline_results.md`,
+`claude_notes/two_regime_investigation.md`,
+`claude_notes/calibration_integration_notes.md`.
 
 ## User decisions from baseline review (2026-08-31)
 
