@@ -1,7 +1,7 @@
 """Snapshot / verify a store's science arrays.
 
-  uv run python claude_notes/store_science_snapshot.py snapshot <store_path> <out.json>
-  uv run python claude_notes/store_science_snapshot.py verify   <store_path> <out.json>
+  uv run python scripts/store_science_snapshot.py snapshot <store_path> <out.json>
+  uv run python scripts/store_science_snapshot.py verify   <store_path> <out.json>
 
 snapshot: records sha256 of every array's bytes (NaNs included) + attrs.
 verify: recomputes and reports, per array: unchanged / MODIFIED / new.
