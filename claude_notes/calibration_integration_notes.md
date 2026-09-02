@@ -128,3 +128,56 @@ same hazard.
 more permissive than in the earlier baseline parquet — offsets are
 medians-over-bins so ok-frame numbers move negligibly, and the production run
 supersedes the baseline anyway.
+
+## ASE production rehearsal (2026-08-31, completed)
+
+Full local-then-sync flow validated end to end on the ASE store:
+1. Scratch-prefix sync smoke test: local icechunk layout uploads to S3 intact
+   (32/32 arrays identical, anonymous read OK).
+2. ASE synced down; baseline sha256 snapshot of all 28 arrays + attrs.
+3. In-place parallel backfill of all 815 frames (statuses: ~678 ok,
+   ~120 insufficient_overlap, ~64 images_unavailable, 0 errors). Two fixes
+   found: (a) backfill worker needed the runner's per-frame fsspec cache
+   cleanup (8 workers leaked ~53 GB and got the run killed); (b) resumability
+   via commit-every-100 worked exactly as designed.
+4. Saturation pass: 11,778 finite margins; season fits incl. 2018 DC8 img1
+   ceiling −24.0 dB, cross-cap step −4.1 dB.
+5. Verification: 28/28 original arrays byte-identical; only the 4 calibration
+   arrays added. Uploaded to s3://opr-radar-metrics/icechunk/ase (old store
+   backed up locally at outputs/ase_s3_backup_20260831 and partially at
+   icechunk/ase-backup-20260831); S3 copy verified identical, opens anonymous.
+
+Operational notes for the big runs:
+- This machine's wifi drops every ~2 min (systemd wifi-rescue service);
+  background tasks doing long S3 transfers get killed. Fix: detached
+  (setsid nohup) retry-loop wrappers (scratchpad resilient_sync.sh) that
+  re-run `aws s3 sync` until two consecutive clean zero-remaining passes.
+- `aws s3 ls/rm s3://…/ase` without trailing slash prefix-matches
+  `ase-backup-*` too — always use the trailing slash for rm.
+
+## Greenland + Antarctica local calibration runs (2026-09-01, complete)
+
+Both pipelines: VERIFY_PASS — 28/28 original arrays byte-identical, only the 4
+calibration fields added; zero load_error across 11,845 frames.
+
+Statuses: GL 3861 ok / 1762 insufficient_overlap / 55 no_combine / 20
+images_unavailable; Ant 5178 ok / 633 insufficient_overlap / 287
+images_unavailable / 49 weight_recovery_failed (to inspect).
+Note: 2013_Greenland_P3 has 663 ok frames — the 2-frame availability probe
+(404s) badly underestimated that season's published img files.
+
+Seam-offset season means (ok frames): mostly |mean| < 2 dB, but real problem
+seasons surfaced: 2016_GL +7.4±9.9 (160/272 frames >3 dB), 2017_Ant_Basler
+−6.8±7.5 (210/337), 2013_Ant_Basler +4.8±6.1, 2017_Ant_P3 +3.0. Coverage:
+per-trace offsets finite GL 118k/214k, Ant 201k/262k.
+
+Saturation (by_source_image fits): GL margins 97k/214k finite; 2014_GL both
+regimes fit (img1 −31.6 / img2 −53.6, cross-cap 16.2 dB — matches predicted
+bias); 2013_GL −50.6. Ant margins only 39k/262k: the source split fragments
+several season populations below support — notably **2012_Antarctica_DC8**
+(img1 span 0.195 dec < 0.25, 8 bins) loses its former flagship −33.1 dB /
+17%-pileup detection. Decision needed: relax span again, or fall back to
+all_traces fit (flagged as mixed) when both subpopulations fail support.
+2018_GL img1 fit_ok(−58.2) is a weak flat envelope (slope −1.5, pileup 1.7%) —
+review. Piecewise model: still no clear real-data winner (fits driven by the
+flat rule); user-requested keep/drop decision now due.
