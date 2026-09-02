@@ -628,19 +628,9 @@ SAT_DEFAULTS = {
     # span less range, and the user chose one uniform minimum over
     # special-casing (2026-08-31).
     "min_span_decades": 0.25,
-    "min_plateau_bins": 3,
-    "min_plateau_span_decades": 0.25,
-    "plateau_max_slope_db_per_decade": 5.0,  # |internal slope| of a plateau
-    "flat_slope_db_per_decade": -12.0,       # overall slope shallower than this = fully flat
-    # beyond the breakpoint the unsaturated envelope must actually fall;
-    # a flat or rising second segment means the model is wrong (e.g. two
-    # gain/altitude regimes), not partial saturation
-    "max_slope_beyond_db_per_decade": -8.0,
-    "min_slope_beyond_db_per_decade": -35.0,  # steeper than any physical envelope
-    # ... and must continue from the plateau level at the breakpoint: a
-    # discontinuity there is a gain/altitude regime step, not a clip level
-    "continuity_tol_db": 3.0,
-    "sse_improvement": 0.3,                  # piecewise must beat linear SSE by this fraction
+    # Overall envelope slope shallower than this = ceiling (flat rule). The
+    # unsaturated envelope falls ~-20 dB/decade.
+    "flat_slope_db_per_decade": -12.0,
     "pileup_delta_db": 1.0,
     "n_boot": 200,
 }
@@ -692,41 +682,18 @@ def _binned_upper_quantile(power_db, range_m, params):
     return np.asarray(xs), np.asarray(qs), np.asarray(ns)
 
 
-def _piecewise_best(xs, qs, params):
-    """Best plateau+line fit over breakpoint grid. Returns
-    (sse, level, breakpoint_x, slope_beyond) or None."""
-    best = None
-    for k in range(params["min_plateau_bins"], len(xs) + 1):
-        px, py = xs[:k], qs[:k]
-        if px[-1] - px[0] < params["min_plateau_span_decades"]:
-            continue
-        internal_slope, _ = _theil_sen(px, py)
-        if np.isfinite(internal_slope) and abs(internal_slope) > params["plateau_max_slope_db_per_decade"]:
-            continue
-        level = float(np.median(py))
-        sse = float(np.sum((py - level) ** 2))
-        slope_beyond = np.nan
-        if k <= len(xs) - 2:
-            rx, ry = xs[k:], qs[k:]
-            slope_beyond, intercept = np.polyfit(rx, ry, 1)
-            if not (params["min_slope_beyond_db_per_decade"] <= slope_beyond
-                    <= params["max_slope_beyond_db_per_decade"]):
-                continue  # must fall like an unsaturated envelope, not a regime cliff
-            if abs((slope_beyond * rx[0] + intercept) - level) > params["continuity_tol_db"]:
-                continue  # segment must continue from the plateau (no regime step)
-            sse += float(np.sum((ry - (slope_beyond * rx + intercept)) ** 2))
-        elif k == len(xs) - 1:
-            continue  # single leftover bin can't constrain a line
-        if best is None or sse < best[0]:
-            best = (sse, level, float(xs[k - 1]), float(slope_beyond) if np.isfinite(slope_beyond) else np.nan)
-    return best
-
-
 def fit_ceiling(power_db, range_m, params=None, rng=None):
-    """Season/segment-level ceiling (clip level) detection.
+    """Season/segment-level ceiling (clip level) detection via the
+    flat-envelope rule: a binned upper-quantile envelope whose Theil-Sen slope
+    is far shallower than the unsaturated ~-20 dB/decade is a ceiling.
 
-    Returns a dict: status, level, level_ci, breakpoint_log10r, slope_beyond,
-    single_slope, pileup_fraction, n_traces, n_bins_occupied, span_decades.
+    (A piecewise plateau+decline model for partial saturation was removed in
+    method 0.4.0: it never decided a fit on any real season across all
+    stores — every detection came from the flat rule — and it complicated the
+    two-regime hardening. See docs/dataset_changelog.md.)
+
+    Returns a dict: status, level, level_ci, single_slope, pileup_fraction,
+    n_traces, n_bins_occupied, span_decades.
     """
     p = dict(SAT_DEFAULTS)
     if params:
@@ -735,7 +702,7 @@ def fit_ceiling(power_db, range_m, params=None, rng=None):
     ok = np.isfinite(power_db) & np.isfinite(range_m) & (range_m > 1)
     power_db, range_m = np.asarray(power_db)[ok], np.asarray(range_m)[ok]
     out = {"status": INSUFFICIENT_SUPPORT, "level": np.nan, "level_ci": (np.nan, np.nan),
-           "breakpoint_log10r": np.nan, "slope_beyond": np.nan, "single_slope": np.nan,
+           "single_slope": np.nan,
            "pileup_fraction": np.nan, "n_traces": int(ok.sum()),
            "n_bins_occupied": 0, "span_decades": np.nan}
     if power_db.size < p["min_traces_per_bin"] * p["min_occupied_bins"]:
@@ -749,34 +716,29 @@ def fit_ceiling(power_db, range_m, params=None, rng=None):
     if span < p["min_span_decades"]:
         return out
 
-    single_slope, single_int = _theil_sen(xs, qs)
+    single_slope, _ = _theil_sen(xs, qs)
     out["single_slope"] = single_slope
-    sse_lin = float(np.sum((qs - (single_slope * xs + single_int)) ** 2))
 
     def decide(xs_, qs_):
-        s, si = _theil_sen(xs_, qs_)
-        sse_l = float(np.sum((qs_ - (s * xs_ + si)) ** 2))
+        s, _ = _theil_sen(xs_, qs_)
         if s >= p["flat_slope_db_per_decade"]:
-            return float(np.median(qs_)), float(xs_[-1]), np.nan  # fully flat
-        pw = _piecewise_best(xs_, qs_, p)
-        if pw is not None and pw[0] <= (1.0 - p["sse_improvement"]) * sse_l:
-            return pw[1], pw[2], pw[3]
+            return float(np.median(qs_))  # flat envelope = ceiling
         return None
 
-    d = decide(xs, qs)
-    if d is None:
+    level = decide(xs, qs)
+    if level is None:
         out["status"] = NO_PLATEAU
         return out
-    out["level"], out["breakpoint_log10r"], out["slope_beyond"] = d
+    out["level"] = level
     out["status"] = FIT_OK
 
     # bootstrap CI on the level (resample occupied bins)
     levels = []
     for _ in range(p["n_boot"]):
         sel = np.sort(rng.integers(0, len(xs), len(xs)))
-        db_ = decide(xs[sel], qs[sel])
-        if db_ is not None:
-            levels.append(db_[0])
+        lvl = decide(xs[sel], qs[sel])
+        if lvl is not None:
+            levels.append(lvl)
     if len(levels) >= 20:
         out["level_ci"] = (float(np.percentile(levels, 2.5)),
                            float(np.percentile(levels, 97.5)))
