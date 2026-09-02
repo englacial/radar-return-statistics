@@ -98,9 +98,19 @@ not_sat   = ~(surface_ceiling_margin_dB < 2.0)         # NaN margin (no ceiling)
 
 | Store | Status |
 |---|---|
-| ase | updated (calibration fields + method 0.4.0 attrs) |
-| greenland | pending push |
-| antarctica | pending push |
+| ase | updated 2026-08-31 (calibration fields + method 0.4.0 attrs) |
+| greenland | updated 2026-09-01 |
+| antarctica | updated 2026-09-01 |
 | utig / crosssystem | not updated (out of current scope) |
 
-Old ASE store preserved at `icechunk/ase-backup-20260831`.
+Old ASE store preserved at `icechunk/ase-backup-20260831`; the greenland and
+antarctica updates were additive (full icechunk history retained in place, so
+the pre-calibration snapshots remain in each store's history).
+
+### Code
+
+Implemented on branch `calibration-checks`
+([PR #4](https://github.com/englacial/radar-return-statistics/pull/4)):
+`93da0ec` (checks, pipeline integration, docs, viewer), `e80d852`
+(sparse-adjacent-bin merging, method 0.3.0), `d5cd19e` (piecewise model
+removed, method 0.4.0), `cc16499` (this changelog).
