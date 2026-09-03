@@ -283,3 +283,58 @@ def test_fingerprint_staleness(local_repo):
     store_mod.write_frame_results(session, "F2", _make_ds(3, "F2", 1, True))
     store_mod.commit_session(session, "more science")
     assert store_mod.saturation_stale(_root(local_repo)) is True
+
+
+def test_backfill_source_index_marks_saturation_stale(local_repo):
+    """A backfill that rewrites surface_source_image_index (a saturation fit
+    input) must invalidate existing saturation results; the next second pass
+    clears the flag."""
+    session = local_repo.writable_session("main")
+    store_mod.write_frame_results(session, "F1", _make_ds(5, "F1", 0, True))
+    store_mod.write_saturation_results(
+        session, np.full(5, np.nan, dtype=np.float32), {"seasons": {}})
+    store_mod.commit_session(session, "science + second pass")
+    assert store_mod.saturation_stale(_root(local_repo)) is False
+
+    session = local_repo.writable_session("main")
+    n = store_mod.update_frame_calibration(
+        session, "F1",
+        per_trace={"surface_source_image_index": np.full(5, 2, dtype=np.int8)},
+        frame_attrs={})
+    store_mod.commit_session(session, "backfill with source index")
+    assert n == 5
+    assert store_mod.saturation_stale(_root(local_repo)) is True
+
+    session = local_repo.writable_session("main")
+    store_mod.write_saturation_results(
+        session, np.full(5, np.nan, dtype=np.float32), {"seasons": {}})
+    store_mod.commit_session(session, "re-run second pass")
+    assert store_mod.saturation_stale(_root(local_repo)) is False
+
+
+def test_update_frame_calibration_mismatch_writes_nothing(local_repo):
+    """Any array-length mismatch aborts the whole frame update (no partial
+    write recorded as success), leaving the frame retryable."""
+    session = local_repo.writable_session("main")
+    store_mod.write_frame_results(session, "F1", _make_ds(4, "F1", 0, True, np.nan))
+    store_mod.update_frame_index(session)
+    root_w = zarr.open_group(session.store, mode="a")
+    root_w.attrs["frame_img_comb_status"] = ["load_error"]
+    store_mod.commit_session(session, "initial")
+
+    session = local_repo.writable_session("main")
+    n = store_mod.update_frame_calibration(
+        session, "F1",
+        per_trace={
+            "img_comb_offset_dB": np.full(4, 0.7, dtype=np.float32),   # correct
+            "surface_source_image_index": np.full(3, 1, dtype=np.int8),  # WRONG length
+        },
+        frame_attrs={"frame_img_comb_status": "ok"},
+    )
+    assert n == 0
+    # nothing to commit — the session must hold zero changes
+    with pytest.raises(Exception, match="no changes"):
+        store_mod.commit_session(session, "attempted backfill")
+    root = _root(local_repo)
+    assert np.all(np.isnan(root["img_comb_offset_dB"][:]))   # nothing written
+    assert list(root.attrs["frame_img_comb_status"]) == ["load_error"]  # retryable

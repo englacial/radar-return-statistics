@@ -567,29 +567,18 @@ def process_frame(opr: OPRConnection, stac_item, config: dict) -> xr.Dataset | N
         # surface source image). Not QC-masking and never QC-masked: these are
         # provenance/quality values downstream users filter on.
         calib = run_frame_calibration(opr, stac_item, frame, proc, frame_id=frame_id)
+        # Attribute templates live in store.CALIBRATION_VAR_ATTRS (single
+        # source of truth with append auto-migration and backfill creation).
+        from .store import CALIBRATION_VAR_ATTRS
         img_comb_offset = as_da(calib["img_comb_offset_dB"]).assign_attrs(
-            description="Residual seam offset of the frame's worst image pair "
-                        "(weight-corrected; the step actually present in the "
-                        "combined product). Positive = earlier (shallower) "
-                        "image brighter. Pair is fixed per frame "
-                        "(img_comb_pair); NaN where unmeasured.",
-            units="dB",
-        )
+            **CALIBRATION_VAR_ATTRS["img_comb_offset_dB"])
         img_comb_pair = as_da(calib["img_comb_pair"]).assign_attrs(
-            description="Image pair img_comb_offset_dB refers to "
-                        "(1 = img1/img2, 2 = img2/img3); -1 undefined.")
+            **CALIBRATION_VAR_ATTRS["img_comb_pair"])
         surface_source_image_index = as_da(calib["surface_source_image_index"]).assign_attrs(
-            description="Image the combined product's surface sample came from. "
-                        "Provenance flag, not a validity verdict: index >= 2 "
-                        "surfaces are more likely saturated and may carry a "
-                        "season-dependent low bias. -1 unknown.")
+            **CALIBRATION_VAR_ATTRS["surface_source_image_index"])
         surface_ceiling_margin_dB = as_da(
             np.full(len(frame.slow_time), np.nan, dtype=np.float32)).assign_attrs(
-            description="Season ceiling minus surface power; filled by the "
-                        "saturation second pass, NaN until then / where no "
-                        "credible ceiling fit exists.",
-            units="dB",
-        )
+            **CALIBRATION_VAR_ATTRS["surface_ceiling_margin_dB"])
 
         # Surface-side metrics are masked only by pick-independent QC so that
         # traces missing a bed pick (or failing thin-ice / bed-SNR checks) keep

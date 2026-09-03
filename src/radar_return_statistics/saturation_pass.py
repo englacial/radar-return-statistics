@@ -3,11 +3,12 @@ write per-trace surface_ceiling_margin_dB + season attrs back to it.
 
   uv run python -m radar_return_statistics.saturation_pass <config.yaml>
 
-Fits img1-sourced and img2-sourced populations separately where
-surface_source_image_index is populated (relaxed range-span minimum), falling
-back to a single all-traces fit otherwise; the cross-cap step is the season's
-empirical img2 bias estimate. Margins are computed against the trace's own
-source population's ceiling when that fit is fit_ok, else NaN.
+Fits the img1-sourced and higher-gain-sourced (index >= 2, one pooled
+population reported as "img2") populations separately where
+surface_source_image_index is populated, falling back to a single all-traces
+fit otherwise; the cross-cap step is the season's empirical higher-gain bias
+estimate. Margins are computed against the trace's own source population's
+ceiling when that fit is fit_ok, else NaN.
 """
 import logging
 import math
@@ -24,7 +25,10 @@ from .config import load_config
 
 logger = logging.getLogger(__name__)
 
-METHOD_VERSION = "0.4.0"  # 0.4.0: piecewise partial-saturation model removed (flat rule only); 0.3.0: sparse-bin merging
+# 0.4.1: two-sided flat-slope band (a rising envelope is no longer a ceiling)
+# 0.4.0: piecewise partial-saturation model removed (flat rule only)
+# 0.3.0: sparse-adjacent-bin merging in range binning
+METHOD_VERSION = "0.4.1"
 
 
 def _jsonable(obj):
@@ -97,15 +101,21 @@ def main(config_path: str, dry_run: bool, verbose: bool) -> None:
     config = load_config(config_path)
     repo = store_mod.open_or_create_repo(config["store"])
 
-    root = zarr.open_group(repo.readonly_session(branch="main").store, mode="r")
+    if dry_run:
+        root = zarr.open_group(repo.readonly_session(branch="main").store, mode="r")
+        if "surface_power_dB" not in root:
+            raise click.ClickException("Store has no surface_power_dB — run the pipeline first")
+        run_saturation_pass(root)
+        click.echo("dry run: no store writes")
+        return
+
+    # Fit and write through ONE session so the margins cannot be computed from
+    # one snapshot and stamped fresh against a concurrently updated one.
+    session = repo.writable_session("main")
+    root = zarr.open_group(session.store, mode="a")
     if "surface_power_dB" not in root:
         raise click.ClickException("Store has no surface_power_dB — run the pipeline first")
     margins, saturation_attrs = run_saturation_pass(root)
-
-    if dry_run:
-        click.echo("dry run: no store writes")
-        return
-    session = repo.writable_session("main")
     store_mod.write_saturation_results(session, margins, saturation_attrs)
     store_mod.commit_session(session, "[calibration] saturation second pass")
     click.echo(f"wrote surface_ceiling_margin_dB ({np.isfinite(margins).sum()} finite margins)")
