@@ -13,16 +13,6 @@ export const STORES: StoreConfig[] = [
     hemisphere: "antarctic",
   },
   {
-    label: "Amundsen Sea Embayment",
-    url: "https://opr-radar-metrics.s3.us-west-2.amazonaws.com/icechunk/ase/",
-    hemisphere: "antarctic",
-  },
-  {
-    label: "UTIG",
-    url: "https://opr-radar-metrics.s3.us-west-2.amazonaws.com/icechunk/utig/",
-    hemisphere: "antarctic",
-  },
-  {
     label: "Greenland",
     url: "https://opr-radar-metrics.s3.us-west-2.amazonaws.com/icechunk/greenland/",
     hemisphere: "arctic",
