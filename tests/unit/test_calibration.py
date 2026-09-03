@@ -256,6 +256,35 @@ def _population(n=20000, clip=None, seed=0):
     return p, r
 
 
+def test_trailing_missing_image_partial_not_ok():
+    """3 images expected, img3's file 404s: pair 2 was never assessed, so the
+    frame must be partial_images (with pair 1's offsets intact), never ok."""
+    combined, images = make_synthetic(step=2.0, imgs_entries=3)
+    # declare a second combine transition + third waveform in the params
+    combined.attrs["param_array"]["array"]["img_comb"] = np.array(
+        [2e-6, -np.inf, 1e-6, 4e-6, -np.inf, 2e-6])
+    combined.attrs["param_records"]["radar"]["wfs"]["Tpd"] = np.array(
+        [1e-6, 2e-6, 4e-6])
+    res = run_check(combined, images)  # StubOPR raises FileNotFoundError for img3
+    assert res["status"] == cal.STATUS_PARTIAL_IMAGES
+    pair_statuses = {pr["pair"]: pr["status"] for pr in res["pairs"]}
+    assert pair_statuses[1] == cal.STATUS_OK
+    assert pair_statuses[2] == cal.STATUS_IMAGES_UNAVAILABLE
+    assert np.isfinite(res["offsets"]).sum() > 0  # measured pair still reported
+
+
+def test_nan_trace_does_not_poison_weights():
+    """One all-NaN trace in the combined product must not turn the image
+    weights NaN (weight_recovery_failed); the frame stays measurable."""
+    combined, images = make_synthetic(s1=1.5, step=2.0)
+    data = combined["Data"].values
+    data[0, :] = np.nan
+    res = run_check(combined, images)
+    assert res["status"] == cal.STATUS_OK
+    assert np.isfinite(res["weights"][1]) and res["weights"][1] == pytest.approx(1.5, abs=0.05)
+    assert res["pairs"][0]["mean"] == pytest.approx(2.0, abs=0.2)
+
+
 def test_clean_population_no_plateau():
     p, r = _population()
     fit = cal.fit_ceiling(p, r)
@@ -284,6 +313,17 @@ def test_dense_blob_thin_tail_clipped():
     # same blob without the clip must not produce a ceiling
     p_clean = 20.0 - 20.0 * np.log10(r) + rng.normal(0, 2.0, r.size)
     assert cal.fit_ceiling(p_clean, r)["status"] != cal.FIT_OK
+
+
+def test_rising_envelope_is_not_a_ceiling():
+    """A steadily rising upper envelope is a gain/geometry artifact, not a
+    clip ceiling: the two-sided flat band must reject it."""
+    rng = np.random.default_rng(3)
+    r = 10 ** rng.uniform(np.log10(300), np.log10(4000), 20000)
+    p = -80.0 + 20.0 * np.log10(r) + rng.normal(0, 2.0, r.size)  # +20 dB/decade
+    fit = cal.fit_ceiling(p, r)
+    assert fit["status"] == cal.NO_PLATEAU
+    assert np.all(np.isnan(cal.ceiling_margin(p, fit)))
 
 
 def test_fully_clipped_population():

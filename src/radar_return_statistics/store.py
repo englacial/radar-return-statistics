@@ -10,6 +10,57 @@ from xarray.coding.times import encode_cf_datetime
 logger = logging.getLogger(__name__)
 
 
+# Attribute templates for the calibration variables, applied wherever the
+# arrays are created (fresh store writes, append auto-migration, backfill).
+CALIBRATION_VAR_ATTRS = {
+    "img_comb_offset_dB": {
+        "units": "dB",
+        "description": (
+            "Residual image-combine seam offset of the frame's worst image "
+            "pair — the power step present in the combined product at the "
+            "combine boundary, measured on the weight-corrected individual "
+            "images in their overlap. Positive = the earlier (lower-index, "
+            "shallower) image is brighter than the later one. NaN = "
+            "unmeasured; see frame_img_comb_status. Suggested downstream "
+            "rejection threshold ~3 dB."),
+    },
+    "img_comb_pair": {
+        "description": (
+            "Image pair img_comb_offset_dB refers to (1 = img1/img2, "
+            "2 = img2/img3), chosen once per frame as the pair with the "
+            "largest |mean offset|; -1 = undefined."),
+    },
+    "surface_source_image_index": {
+        "description": (
+            "Image that supplied the combined product's surface sample "
+            "(1 = low-gain img1; >=2 = a higher-gain image; -1 = unknown). "
+            "Provenance flag, not a validity verdict: higher-gain-sourced "
+            "surfaces are more likely saturated and may carry a "
+            "season-dependent low bias (see the season's cross_cap_step_db), "
+            "but for high-altitude operations they are the normal geometry."),
+    },
+    "surface_ceiling_margin_dB": {
+        "units": "dB",
+        "description": (
+            "Season ceiling of the trace's surface-source population minus "
+            "surface_power_dB. Small/zero => at the clip ceiling (likely "
+            "saturated). NaN => no credible ceiling was fitted for that "
+            "population (a clean season has no ceiling), or power undefined."),
+    },
+}
+
+
+def apply_calibration_var_attrs(root: zarr.Group) -> int:
+    """Stamp the calibration attribute templates onto existing arrays that
+    lack them. Returns the number of arrays updated."""
+    n = 0
+    for name, attrs in CALIBRATION_VAR_ATTRS.items():
+        if name in root and not dict(root[name].attrs):
+            root[name].attrs.update(attrs)
+            n += 1
+    return n
+
+
 def _fill_value_for(dtype: np.dtype):
     """Fill value used when backfilling a variable that predates the store."""
     dtype = np.dtype(dtype)
@@ -106,6 +157,8 @@ def _zarr_append(root: zarr.Group, ds: xr.Dataset) -> None:
                 "%d existing traces with %r", name, data.dtype, existing_size, fill)
             root.create_array(name, shape=(existing_size,), dtype=data.dtype,
                               chunks=(PER_TRACE_CHUNK_SIZE,), fill_value=fill)
+            if name in CALIBRATION_VAR_ATTRS:
+                root[name].attrs.update(CALIBRATION_VAR_ATTRS[name])
         arr = root[name]
         old_size = arr.shape[0]
         arr.resize(old_size + n_new)
@@ -275,11 +328,23 @@ def science_fingerprint(root: zarr.Group) -> dict:
 
 def saturation_stale(root: zarr.Group) -> bool | None:
     """True if the stored saturation second-pass results predate the current
-    science data; None if no second pass has been run."""
+    science data OR were explicitly marked stale (e.g. a calibration backfill
+    rewrote surface_source_image_index, a fit input); None if no second pass
+    has been run."""
     meta = root.attrs.get("saturation")
     if not meta:
         return None
+    if meta.get("stale"):
+        return True
     return meta.get("fingerprint") != science_fingerprint(root)
+
+
+def mark_saturation_stale(root: zarr.Group) -> None:
+    """Flag existing saturation results as stale (cleared by the next
+    write_saturation_results). No-op when no second pass has run yet."""
+    meta = root.attrs.get("saturation")
+    if meta and not meta.get("stale"):
+        root.attrs["saturation"] = {**meta, "stale": True}
 
 
 def write_saturation_results(
@@ -295,13 +360,12 @@ def write_saturation_results(
     margins = np.asarray(margins, dtype=np.float32)
     if margins.shape != (n,):
         raise ValueError(f"margins shape {margins.shape} != store traces ({n},)")
-    attrs = {}
+    attrs = dict(CALIBRATION_VAR_ATTRS["surface_ceiling_margin_dB"])
     if "surface_ceiling_margin_dB" in root:
-        attrs = dict(root["surface_ceiling_margin_dB"].attrs)
+        attrs.update(dict(root["surface_ceiling_margin_dB"].attrs))
     root.create_array("surface_ceiling_margin_dB", data=margins,
                       chunks=(PER_TRACE_CHUNK_SIZE,), overwrite=True)
-    if attrs:
-        root["surface_ceiling_margin_dB"].attrs.update(attrs)
+    root["surface_ceiling_margin_dB"].attrs.update(attrs)
     root.attrs["saturation"] = {**saturation_attrs,
                                 "fingerprint": science_fingerprint(root)}
 
@@ -314,24 +378,33 @@ def update_frame_calibration(
 ) -> int:
     """Rewrite one frame's calibration values in place (backfill of retryable
     statuses) without touching science metrics. Returns traces updated (0 if
-    the frame is absent or its trace count changed)."""
+    the frame is absent or ANY array's trace count mismatches — nothing is
+    written in that case, so the frame stays retryable). Marks existing
+    saturation results stale when surface_source_image_index (a saturation
+    fit input) is rewritten."""
     root = zarr.open_group(session.store, mode="a")
     if "frame_id" not in root:
         return 0
     idx = np.where(root["frame_id"][:] == frame_id)[0]
     if idx.size == 0:
         return 0
+    # All-or-nothing: validate every array before any mutation. A partial
+    # write recorded as success would drop the frame from retry selection.
+    per_trace = {name: np.asarray(vals) for name, vals in per_trace.items()}
+    for name, vals in per_trace.items():
+        if vals.shape != idx.shape:
+            logger.warning("Backfill %s: %s has %d values for %d traces; frame "
+                           "left unwritten and retryable",
+                           frame_id, name, vals.size, idx.size)
+            return 0
     n_total = root["frame_id"].shape[0]
     for name, vals in per_trace.items():
-        vals = np.asarray(vals)
-        if vals.shape != idx.shape:
-            logger.warning("Backfill %s: %s has %d values for %d traces; skipping",
-                           frame_id, name, vals.size, idx.size)
-            continue
         if name not in root:
             fill = _fill_value_for(vals.dtype)
             root.create_array(name, shape=(n_total,), dtype=vals.dtype,
                               chunks=(PER_TRACE_CHUNK_SIZE,), fill_value=fill)
+            if name in CALIBRATION_VAR_ATTRS:
+                root[name].attrs.update(CALIBRATION_VAR_ATTRS[name])
         arr = root[name]
         if idx.size and np.all(np.diff(idx) == 1):
             arr[idx[0]: idx[-1] + 1] = vals
@@ -347,4 +420,6 @@ def update_frame_calibration(
             lst += [None] * (len(frame_names) - len(lst))
             lst[pos] = value
             root.attrs[attr_name] = lst
+    if "surface_source_image_index" in per_trace:
+        mark_saturation_stale(root)
     return int(idx.size)

@@ -165,11 +165,15 @@ During step 4 each frame also runs the image-combine calibration check
 (`processing.calibration.img_combine`, default on; ~3x wall time and ~2.5x
 download volume per frame from the individual image loads). Calibration
 failures degrade to a per-frame status and never fail a frame. After the
-science data is complete, run the saturation second pass:
+science data is complete, first backfill any retryable calibration statuses,
+then run the saturation second pass — the pass fits per surface-source-image
+population (img1 vs the pooled higher-gain images, index >= 2), so backfills
+that rewrite `surface_source_image_index` mark existing saturation results
+stale until the pass is re-run:
 
 ```bash
-uv run python -m radar_return_statistics.saturation_pass config/config_antarctica.yaml
 uv run python -m radar_return_statistics.calibration_backfill config/config_antarctica.yaml  # retry load_error/disabled frames
+uv run python -m radar_return_statistics.saturation_pass config/config_antarctica.yaml
 ```
 
 ### Testing

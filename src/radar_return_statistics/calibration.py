@@ -6,8 +6,9 @@ image over the section it sourced), then measure the residual seam offset
 actually present in the combined product at each image transition.
 
 Check 2 — surface saturation: population-level detection of a hard ceiling in
-surface power vs range-to-surface (piecewise plateau fit vs a pure-slope
-model), run as a second pass over store outputs.
+surface power vs range-to-surface (flat-envelope rule on a binned
+upper-quantile curve, fitted per surface-source-image population), run as a
+second pass over store outputs.
 
 Sign convention: positive offset = the earlier (lower-index, shallower) image
 is brighter than the later one in the combined product.
@@ -329,8 +330,14 @@ def recover_weights(tc, Dc_db, images_db, bounds, trim_s=DEFAULTS["trim_s"],
             m = (tc >= lo) & (tc <= hi)
             if m.sum() < min_bins:
                 continue
-            vals.append(np.median(Dc_db[r, m] - np.interp(tc[m], ti, Di[r])))
+            diff = Dc_db[r, m] - np.interp(tc[m], ti, Di[r])
+            diff = diff[np.isfinite(diff)]
+            if diff.size:
+                vals.append(np.median(diff))
+        # one NaN trace (unmatched alignment, NaN samples in the section) must
+        # not poison the whole image's weight
         vals = np.asarray(vals)
+        vals = vals[np.isfinite(vals)]
         if vals.size == 0:
             w[i], spread[i], n_used[i] = np.nan, np.nan, 0
         else:
@@ -510,7 +517,13 @@ def check_img_combine(opr, stac_item, combined_ds, data_product,
             result["status"] = STATUS_IMAGES_UNAVAILABLE
         return result
 
-    n_images = max(images_db)
+    # Pair coverage must reflect EXPECTED images, not merely loaded ones: a
+    # trailing missing image (img3 404 when params declare 3) must surface as
+    # an unassessed pair (-> partial_images), never silently shorten the pair
+    # list and leave the frame "ok". The declared img_comb length still bounds
+    # the pair count below, which protects against inflated 2014-era
+    # per-wf-adc imgs lists.
+    n_images = max(max(images_db), min(expected or 0, MAX_IMAGES))
     # Resolve the img_comb vector (Tpd defaults when declared empty/missing)
     if img_comb is None or img_comb.size < 3:
         tpd = find_tpd(attrs)
@@ -628,9 +641,12 @@ SAT_DEFAULTS = {
     # span less range, and the user chose one uniform minimum over
     # special-casing (2026-08-31).
     "min_span_decades": 0.25,
-    # Overall envelope slope shallower than this = ceiling (flat rule). The
-    # unsaturated envelope falls ~-20 dB/decade.
+    # Flat rule: the envelope slope must sit in a near-flat band to count as a
+    # ceiling. The unsaturated envelope falls ~-20 dB/decade; a strongly
+    # RISING envelope is not a clip ceiling either (gain/geometry artifact),
+    # so the band is two-sided.
     "flat_slope_db_per_decade": -12.0,
+    "flat_slope_max_db_per_decade": 12.0,
     "pileup_delta_db": 1.0,
     "n_boot": 200,
 }
@@ -721,8 +737,8 @@ def fit_ceiling(power_db, range_m, params=None, rng=None):
 
     def decide(xs_, qs_):
         s, _ = _theil_sen(xs_, qs_)
-        if s >= p["flat_slope_db_per_decade"]:
-            return float(np.median(qs_))  # flat envelope = ceiling
+        if p["flat_slope_db_per_decade"] <= s <= p["flat_slope_max_db_per_decade"]:
+            return float(np.median(qs_))  # near-flat envelope = ceiling
         return None
 
     level = decide(xs, qs)

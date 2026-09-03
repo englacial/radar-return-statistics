@@ -1,6 +1,6 @@
 # Dataset changelog
 
-## 2026-09 — Radiometric calibration fields (calibration method 0.4.0)
+## 2026-09 — Radiometric calibration fields (calibration method 0.4.1)
 
 New per-trace variables and per-frame/season metadata for two radiometric
 calibration checks, added to the **ase**, **greenland**, and **antarctica**
@@ -23,17 +23,24 @@ every original array byte-identical before/after the update).
 `frame_img_comb_status`, `frame_img_comb_weights_mode` (declared OPR combine
 weights mode, provenance only).
 
-Statuses: `ok`, `no_combine` (single image — check not applicable),
-`images_unavailable` (img files not published), `insufficient_overlap` (no
-artifact-free overlap window at the frame's geometry — e.g. 2014-era
-Greenland P3 at typical AGL), `weight_recovery_failed`, `load_error`
-(transient, retryable), `invalid_params`, `params_missing`, `disabled`.
-NaN offsets accompany every non-`ok` status; no estimate is substituted.
+Statuses: `ok` (every expected image pair was assessed — measured, or
+honestly `insufficient_overlap`), `partial_images` (an expected pair was
+never assessed because its image file is missing; offsets from the measured
+pairs are still reported), `no_combine` (single image — check not
+applicable), `images_unavailable` (img files not published),
+`insufficient_overlap` (no artifact-free overlap window at the frame's
+geometry — e.g. 2014-era Greenland P3 at typical AGL),
+`weight_recovery_failed`, `load_error` (transient, retryable),
+`invalid_params`, `params_missing`, `disabled`. Except for `ok` and
+`partial_images`, offsets are NaN; no estimate is ever substituted.
 
 ### New root attribute: `saturation`
 
-Season-keyed dict from the saturation second pass: per source-image
-population — `status` (`fit_ok` / `no_plateau` / `insufficient_support`),
+Season-keyed dict from the saturation second pass. Populations are split as
+**img1-sourced vs higher-gain-sourced** — every `surface_source_image_index
+>= 2` trace is pooled into one population reported as `img2` (individual
+img3+ surfaces are too rare to fit separately). Per population — `status`
+(`fit_ok` / `no_plateau` / `insufficient_support`),
 `level` (dB), `level_ci` (bootstrap 95%), `single_slope` (dB/decade),
 `pileup_fraction`, `n_traces`, `n_bins_occupied`, `span_decades` — plus
 `cross_cap_step_db` (measured img1-vs-img2 envelope offset: the season's
@@ -79,7 +86,8 @@ not_sat   = ~(surface_ceiling_margin_dB < 2.0)         # NaN margin (no ceiling)
 - **Ceiling detection** uses a binned 99th-percentile envelope vs log range
   with equal-width bins and sparse-adjacent-bin merging (0.3.0), fitted per
   source-image population; a ceiling is declared when the Theil–Sen slope is
-  far shallower than the unsaturated ~−20 dB/decade (flat rule). A piecewise
+  within a near-flat band (−12 to +12 dB/decade, vs the unsaturated ~−20;
+  a strongly rising envelope is not a ceiling either — 0.4.1). A piecewise
   partial-saturation model was removed (0.4.0) after deciding zero fits on
   real data across all stores.
 
@@ -98,10 +106,15 @@ not_sat   = ~(surface_ceiling_margin_dB < 2.0)         # NaN margin (no ceiling)
 
 | Store | Status |
 |---|---|
-| ase | updated 2026-08-31 (calibration fields + method 0.4.0 attrs) |
-| greenland | updated 2026-09-01 |
-| antarctica | updated 2026-09-01 |
+| ase | updated 2026-08-31; method 0.4.1 refresh 2026-09-03 |
+| greenland | updated 2026-09-01; method 0.4.1 refresh 2026-09-03 |
+| antarctica | updated 2026-09-01; method 0.4.1 refresh 2026-09-03 |
 | utig / crosssystem | not updated (out of current scope) |
+
+The 0.4.1 refresh (PR-review fixes) changed one fit — 2018_Antarctica_DC8's
+img2 population, a rising envelope, is no longer reported as a ceiling
+(margins now NaN there) — and added descriptive attrs to the calibration
+arrays; no other values moved.
 
 Old ASE store preserved at `icechunk/ase-backup-20260831`; the greenland and
 antarctica updates were additive (full icechunk history retained in place, so
