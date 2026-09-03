@@ -126,4 +126,5 @@ Implemented on branch `calibration-checks`
 ([PR #4](https://github.com/englacial/radar-return-statistics/pull/4)):
 `93da0ec` (checks, pipeline integration, docs, viewer), `e80d852`
 (sparse-adjacent-bin merging, method 0.3.0), `d5cd19e` (piecewise model
-removed, method 0.4.0), `cc16499` (this changelog).
+removed, method 0.4.0), `cc16499` (this changelog), `c398ff7` (PR-review
+fixes, method 0.4.1).
